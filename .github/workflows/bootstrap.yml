@@ -1,0 +1,13 @@
+name: Bootstrap
+on:
+  pull_request:
+  push:
+    branches: [main, 'epic/**']
+permissions:
+  contents: read
+jobs:
+  docs:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: git diff --check $(git hash-object -t tree /dev/null) HEAD

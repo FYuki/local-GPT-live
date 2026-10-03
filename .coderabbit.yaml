@@ -1,0 +1,15 @@
+# yaml-language-server: $schema=https://coderabbit.ai/integrations/schema.v2.json
+language: ja-JP
+reviews:
+  profile: assertive
+  poem: false
+  auto_review:
+    enabled: false
+  path_instructions:
+    - path: '**'
+      instructions: |
+        差分をAGENTS.mdとdocsの責務・取消契約へ照合する。
+        入力世代、遅延STT/TTS、再生停止、Coreとの境界を重点確認する。
+        mock成功を実音声品質の合格と扱わない。
+chat:
+  art: false
