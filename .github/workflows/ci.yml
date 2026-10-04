@@ -1,0 +1,47 @@
+name: Voice foundation
+on:
+  pull_request:
+  push:
+    branches: [main, 'epic/**']
+permissions:
+  contents: read
+jobs:
+  scope:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      has_voice: ${{ steps.package.outputs.present }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: package
+        shell: bash
+        run: |
+          if test -f pyproject.toml; then
+            echo 'present=true' >> "$GITHUB_OUTPUT"
+          elif test -d src || test -d tests || test -f uv.lock; then
+            echo '音声実装があるのにpyproject.tomlがありません。' >&2
+            exit 1
+          else
+            echo 'present=false' >> "$GITHUB_OUTPUT"
+            echo '音声package未追加: 設定のみ検証。音声テストは未実施。' >> "$GITHUB_STEP_SUMMARY"
+          fi
+  checks:
+    needs: scope
+    if: needs.scope.outputs.has_voice == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: astral-sh/setup-uv@v6
+        with:
+          version: '0.8.22'
+      - run: uv sync --frozen
+      - run: uv run --no-sync pytest -q
+      - run: uv run --no-sync ruff check .
+      - run: uv run --no-sync mypy
+      - run: uv run --no-sync python tools/check_docs.py
+      - run: uv build
+      - run: uv run --no-sync voice-demo
