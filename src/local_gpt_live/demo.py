@@ -81,7 +81,8 @@ async def run_scenario(events: list[dict[str, Any]]) -> list[Event]:
                 response_id = session.active
                 while (packet := session.playback.consume()) is not None:
                     # 合成端末の区間完了ACK。実ブラウザの出力確認とは別のfixture。
-                    assert session.acknowledge_playback(packet.response_id, packet.sequence)
+                    if not session.acknowledge_playback(packet.response_id, packet.sequence):
+                        raise RuntimeError("fixture_playback_ack_rejected")
                 if response_id is not None:
                     session.playback_completed(response_id)
             elif kind == "cancel":

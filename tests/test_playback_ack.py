@@ -1,10 +1,13 @@
 """配信だけで再生完了を確定しない境界。実ブラウザの検証ではない。"""
 
 import asyncio
+import json
+import subprocess
+import sys
 
 import pytest
 
-from local_gpt_live.demo import FixtureCore, FixtureStt, FixtureTts
+from local_gpt_live.demo import FixtureCore, FixtureStt, FixtureTts, run_scenario
 from local_gpt_live.playback import AudioPacket, Playback
 from local_gpt_live.session import VoiceSession
 
@@ -53,6 +56,25 @@ def test_new_response_and_stop_revoke_old_ack():
     playback.stop()
     assert not playback.acknowledge("next-response", 0)
     assert not playback.all_confirmed
+
+
+def test_cli_playback_ack_runs_under_optimization():
+    result = subprocess.run([sys.executable, "-O", "-m", "local_gpt_live.demo"],
+                            capture_output=True, text=True, encoding="utf-8", timeout=30)
+    assert result.returncode == 0, result.stderr
+    scenarios = [json.loads(line) for line in result.stdout.splitlines()]
+    assert len(scenarios) == 7
+    assert all(scenario["status"] == "pass" for scenario in scenarios)
+    for scenario in scenarios:
+        if scenario["scenario"] in {"overlap-backchannel", "continuous"}:
+            assert any(event["kind"] == "playback_completed" for event in scenario["events"])
+
+
+async def test_fixture_rejected_ack_fails_explicitly(monkeypatch):
+    monkeypatch.setattr(VoiceSession, "acknowledge_playback", lambda *args: False)
+    with pytest.raises(RuntimeError, match="fixture_playback_ack_rejected"):
+        await run_scenario([{"kind": "text", "text": "合成入力"}, {"kind": "settle"},
+                            {"kind": "playback"}])
 
 
 async def test_generation_and_delivery_do_not_prove_playback_completion():
