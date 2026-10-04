@@ -1,0 +1,9 @@
+[
+  {"name":"silence","events":[{"kind":"silence"}],"expect":[],"forbid":["speech_started","response_started"]},
+  {"name":"overlap-backchannel","events":[{"kind":"text","text":"説明して"},{"kind":"settle"},{"kind":"audio","text":"うん"},{"kind":"settle"},{"kind":"playback"}],"expect":["turn_decision","playback_completed"],"forbid":["response_cancelled"]},
+  {"name":"interrupt","events":[{"kind":"text","text":"説明して"},{"kind":"settle"},{"kind":"audio","text":"止めて。次の質問です"},{"kind":"settle"}],"expect":["response_cancelled","audio_queued"]},
+  {"name":"continuous","events":[{"kind":"audio","text":"一つめ"},{"kind":"settle"},{"kind":"playback"},{"kind":"audio","text":"二つめ"},{"kind":"settle"},{"kind":"playback"}],"expect":["playback_completed"],"forbid":["response_failed"]},
+  {"name":"reconnect","events":[{"kind":"text","text":"説明して"},{"kind":"settle"},{"kind":"reconnect"},{"kind":"audio","text":"再開"},{"kind":"settle"}],"expect":["input_reopen_required","response_cancelled","audio_queued"]},
+  {"name":"cancel","events":[{"kind":"text","text":"説明して"},{"kind":"settle"},{"kind":"cancel"}],"expect":["playback_stopped","response_cancelled"]},
+  {"name":"timeout","events":[{"kind":"text","text":"timeout"},{"kind":"settle"},{"kind":"audio","text":"復帰"},{"kind":"settle"}],"expect":["response_failed","audio_queued"]}
+]

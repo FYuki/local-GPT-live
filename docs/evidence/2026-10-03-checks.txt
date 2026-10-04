@@ -1,0 +1,12 @@
+Python 3.12.3
+........................................................................ [100%]
+72 passed in 1.84s
+All checks passed!
+Success: no issues found in 14 source files
+日本語docs入口・相対リンク: OK
+Building source distribution...
+Building wheel from source distribution...
+Successfully built dist/local_gpt_live-0.1.0.tar.gz
+Successfully built dist/local_gpt_live-0.1.0-py3-none-any.whl
+CLI fixture: 7/7 passed
+Wheel VAD assets/licenses/fixtures: OK
