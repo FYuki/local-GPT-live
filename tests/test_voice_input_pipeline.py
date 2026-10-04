@@ -120,7 +120,8 @@ def test_gap_discards_tail_until_quiet_boundary() -> None:
 
 
 @pytest.mark.parametrize(
-    "pcm,start", [(b"x", 0), (b"", 0), (bytes(32002), 0), (bytes(320), -1)]
+    "pcm,start", [(b"x", 0), (b"", 0), (bytes(32002), 0), (bytes(320), -1)],
+    ids=["odd-length", "empty", "oversized", "negative-start"],
 )
 def test_invalid_audio_resets_pending_without_unbounded_buffer(
     pcm: bytes, start: int
