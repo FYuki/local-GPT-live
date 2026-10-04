@@ -13,3 +13,6 @@ GPU・マイク・共有サービスへ接続せず、7種類の合成イベン�
 [境界ADR](docs/adr/0001-voice-boundary.md)・[用語](CONTEXT.md)・
 [実装と未統合範囲](docs/architecture.md)・[検証手順](docs/testing.md)・
 [初回公開手順](docs/initialization.md)を確認してください。
+
+公式RTC SDKへの接続は[LiveKitアダプター](docs/livekit-adapter.md)を参照してください。
+合成試験には`uv sync --frozen --extra livekit`を使用します。実接続・ブラウザACKの受入とは区別します。

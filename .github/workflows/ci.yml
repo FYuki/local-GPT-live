@@ -38,7 +38,7 @@ jobs:
       - uses: astral-sh/setup-uv@v6
         with:
           version: '0.8.22'
-      - run: uv sync --frozen
+      - run: uv sync --frozen --extra livekit
       - run: uv run --no-sync pytest -q
       - run: uv run --no-sync ruff check .
       - run: uv run --no-sync mypy

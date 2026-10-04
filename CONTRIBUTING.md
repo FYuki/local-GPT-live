@@ -30,7 +30,7 @@ git diff --check
 音声package追加後の必須検証:
 
 ```sh
-uv sync --frozen
+uv sync --frozen --extra livekit
 uv run --no-sync pytest -q
 uv run --no-sync ruff check .
 uv run --no-sync mypy
