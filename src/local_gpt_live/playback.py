@@ -22,6 +22,8 @@ class Playback:
         self._packets: deque[AudioPacket] = deque()
         self._bytes = 0
         self._next_sequence = 0
+        self._delivered_sequence = -1
+        self._confirmed_sequence = -1
 
     def start(self, response_id: str) -> None:
         self.stop()
@@ -32,6 +34,8 @@ class Playback:
         self._packets.clear()
         self._bytes = 0
         self._next_sequence = 0
+        self._delivered_sequence = -1
+        self._confirmed_sequence = -1
 
     def enqueue(self, packet: AudioPacket) -> bool:
         if packet.response_id != self.active:
@@ -51,7 +55,36 @@ class Playback:
             return None
         packet = self._packets.popleft()
         self._bytes -= len(packet.wav)
-        return packet if packet.response_id == self.active else None
+        if packet.response_id != self.active:
+            return None
+        self._delivered_sequence = packet.sequence
+        return packet
+
+    def acknowledge(self, response_id: str, sequence: int) -> bool:
+        """認証済みtransportから、区間全体の実再生ACKを順に受け取る。
+
+        配信済み区間だけを受理する。再送は冪等、飛び越しは拒否する。
+        認証・端末の出力時計との照合は呼び出すadapterの責務。
+        """
+        if (response_id != self.active or type(sequence) is not int or sequence < 0
+                or sequence > self._delivered_sequence):
+            return False
+        if sequence <= self._confirmed_sequence:
+            return True
+        if sequence != self._confirmed_sequence + 1:
+            return False
+        self._confirmed_sequence = sequence
+        return True
+
+    @property
+    def confirmed_sequence(self) -> int:
+        """現在responseの、全体再生がACKされた連続prefixの末尾。"""
+        return self._confirmed_sequence
+
+    @property
+    def all_confirmed(self) -> bool:
+        return (self.active is not None and not self._packets
+                and self._confirmed_sequence == self._next_sequence - 1)
 
     @property
     def pending_bytes(self) -> int:
