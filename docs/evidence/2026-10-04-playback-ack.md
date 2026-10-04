@@ -3,7 +3,9 @@
 関連: [Issue #1](https://github.com/FYuki/local-GPT-live/issues/1)、
 [提案契約](../adr/0002-playback-ack.md)。
 base: `01a680aa9825bcff0da7a1d8a83b9463cc231f1b`。
-検証対象コード: `48c875f9603a47561aa9f7f5a4af7df0f0b3b959`。後続コミットはこの証跡の文書追加のみ。
+初回検証コード: `48c875f9603a47561aa9f7f5a4af7df0f0b3b959`（88テスト成功）。
+CodeRabbit対応後の最終コード: `48fef7b79df2426cf5088bb93ba9648344fb0098`。
+後続コミットはこの証跡の文書更新のみ。
 
 ## 環境と結果
 
@@ -15,7 +17,7 @@ OSインストール、共有GPUサービス、既存mainの作業ファイル�
 
 | コマンド | 結果 |
 | --- | --- |
-| pytest -q -p no:cacheprovider | 88 passed（新規16件、skipなし） |
+| pytest -q -p no:cacheprovider | 90 passed（新規18件、skipなし） |
 | ruff check . --no-cache | 成功 |
 | mypy --cache-dir 検証用ディレクトリ | 14 source files、成功 |
 | python tools/check_docs.py | 日本語文書入口・相対リンク、成功 |
@@ -28,6 +30,16 @@ OSインストール、共有GPUサービス、既存mainの作業ファイル�
 配信済み未再生の完了拒否、cancel/reconnect/close/新responseを通す。
 既存のCore loopback socket取消試験も実行した。Core/Whisper/TTS実サービスの合格ではない。
 実行stdoutとコマンド一覧は作業領域の`playback-pr-validation.json`へ保存した。
+
+## CodeRabbitの差分レビュー
+
+最初のhead `40166df5d18e85927c79c5c5c65ebc6c0c31e52d`について、
+[実レビュー](https://github.com/FYuki/local-GPT-live/pull/2#pullrequestreview-5404375595)
+はbase `01a680a`からの8ファイルだけを選択した。設定はja-JP/assertive、auto review無効のまま。
+[指摘1件](https://github.com/FYuki/local-GPT-live/pull/2#discussion_r4176182066)は、
+CLIのACK呼出しがassert式内にあり`python -O`で消えること。コードを確認して修正し、
+最適化モードでの7シナリオ通過と、ACK拒否時の明示例外を追加検証した。
+全90テストと上記lint/type/docs/build/CLIを再実行して成功。最終headのCIと差分再レビューはPR本文に記録する。
 
 ## 実接続の状態と制限
 
