@@ -43,6 +43,9 @@ CLIのACK呼出しがassert式内にあり`python -O`で消えること。コー
 
 ## 実接続の状態と制限
 
+以下は環境指定が明確になる前の初回時点の記録。後にユーザーがdevをWSLの`Ubuntu`と明示し、
+[Ubuntuでの合成実接続検証](2026-10-04-ubuntu-connections.md)を実施した。初回のNOT RUNは履歴として保持する。
+
 ユーザー指定はUbuntu-dev。正規の権限経路で`wsl.exe --list --verbose`を確認したが、
 存在するのはUbuntu（停止中）とUbuntu-dogfood（実行中）のみ。Ubuntu-devの実在・user・
 サービスを確認できないため、実接続はNOT RUN。他のディストリビューションを起動して代替していない。

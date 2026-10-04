@@ -50,4 +50,5 @@ LiveKit接続・認証・新track・入力grantの検証と、ブラウザ出力
 `tests/test_playback_ack.py`で未配信、順序違反、再送、不正型、旧response、生成中ACK、
 生成終了と配信終了だけでは完了できないこと、cancel/reconnect/close/新responseを検証する。
 合成CLIはfixture上の区間完了ACKを明示的に発行する。実端末の受入証拠ではない。
-実接続先はユーザー指定のUbuntu-devのみ。見つからなければ他のWSLへ置き換えない。
+devの実行主体はユーザー指定のWSLディストリビューション`Ubuntu`とする。
+共有推論endpointの所在と、実接続テストを実行するディストリビューションを区別する。
