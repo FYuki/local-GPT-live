@@ -34,7 +34,7 @@ OSインストール、共有GPUサービス、既存mainの作業ファイル�
 ## CodeRabbitの差分レビュー
 
 最初のhead `40166df5d18e85927c79c5c5c65ebc6c0c31e52d`について、
-[実レビュー](https://github.com/FYuki/local-GPT-live/pull/2#pullrequestreview-5404375595)
+[実レビュー](https://github.com/FYuki/local-GPT-live/pull/2#pullrequestreview-5404371499)
 はbase `01a680a`からの8ファイルだけを選択した。設定はja-JP/assertive、auto review無効のまま。
 [指摘1件](https://github.com/FYuki/local-GPT-live/pull/2#discussion_r4176182066)は、
 CLIのACK呼出しがassert式内にあり`python -O`で消えること。コードを確認して修正し、
