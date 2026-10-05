@@ -33,7 +33,9 @@ Coreへはaliasと確定textを送る。人格prompt、tool実行、長期記憶
 - 相槌/曖昧反応は旧回答を継続する。take_turn、明示cancel、text優先、reconnectで旧出力を失効させる。
 - 停止順序は出力失効・queue消去→playback_stopped→生成task取消→response_cancelled。
   遅いprovider完了はactive responseを再照合する。出力packetにもresponse_id/sequenceを付ける。
-- generation_completed後も未再生の回答は取消可能。playback_completedは端末側の事実として別途ACKする。
+- generation_completed後も未再生の回答は取消可能。配信済み区間を0始まりの連続番号で
+  acknowledge_playbackへACKし、全区間を確認してからplayback_completedで終端へ進む。
+  consumeやqueueの空だけでは再生完了にしない。[Backend受付契約](adr/0002-playback-ack.md)を参照。
 - `Playback.consume`は端末への引渡しであり、実出音の証拠ではない。実adapterはstop時にデバイスqueueも消す。
 - provider taskは最大4件、出力queueは4MB、回答textは16,000文字。容量超過・timeoutは失敗通知し後続会話を受ける。
 - Session.closeは取消後1秒までdrainを待つ。取消を無視する外部providerはshutdown_pendingを通知し、成功扱いしない。

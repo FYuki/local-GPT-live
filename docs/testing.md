@@ -19,6 +19,13 @@ uv run --no-sync voice-demo
 STTの認識精度、スピーカーの出音、WebRTC統計、遅延品質を測定した試験ではない。
 provider integrationはHTTP mockとローカルloopback fixtureで契約と切断を検証する。
 
+実再生ACKのBackend境界は`tests/test_playback_ack.py`で検証する。未配信・飛び越し・
+不正型・旧responseを拒否し、再送の冪等性、生成中ACK、取消後の失効を確認する。
+合成CLIの端末ACKはfixture上の事実であり、LiveKitやブラウザの実出力確認ではない。
+ユーザーが指定するdev環境はWSLディストリビューション`Ubuntu`。実接続テストもUbuntuから行う。
+共有推論endpointがUbuntu-dogfoodにあっても、devの実行主体を置き換えない。
+合成入力による部分的な実接続結果は[Ubuntu検証証跡](evidence/2026-10-04-ubuntu-connections.md)を参照する。
+
 ## 実音声受入（別枠）
 
 1. 親作業者とGPU利用時間・Core版・共有STT/TTS endpointを固定する。サービス再設定はしない。
