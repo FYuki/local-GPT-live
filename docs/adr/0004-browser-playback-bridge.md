@@ -1,6 +1,6 @@
 # ADR 0004: 識別済みPCMのブラウザ描画と個別ACKの受信境界
 
-状態: 提案（ローカル統合、ネットワークhostとLiveKit RTP対応付けは未実装）
+状態: 提案（ネットワークhostとLiveKit RTP対応付けは未実装）
 
 ## 背景
 
@@ -27,4 +27,5 @@ ACKはbackend受理で確定し、完了通知は生成完了かつ全区間ACK�
 既存RTP受信音声を鳴らしながら本rendererでも同音声を鳴らす二重出力は禁止します。
 
 headlessの合成検証はsoftware renderの証拠です。音声装置の可聴受入やLiveKit経由ACKの本番受入とは
-区別します。未公開browser依存を含む間はローカル専用とし、公開は依存所有者の公開後に調整します。
+区別します。browser依存はPR5として公開・統合済みです。公開経緯とbackend依存の順序は
+[検証記録](../evidence/2026-10-05-browser-playback-bridge.md)を参照してください。

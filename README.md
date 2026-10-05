@@ -17,5 +17,5 @@ GPU・マイク・共有サービスへ接続せず、7種類の合成イベン�
 公式RTC SDKへの接続は[LiveKitアダプター](docs/livekit-adapter.md)を参照してください。
 合成試験には`uv sync --frozen --extra livekit`を使用します。実接続・ブラウザACKの受入とは区別します。
 
-識別済みPCMを描画してACKするローカル接続層は[ブラウザACK接続](docs/browser-playback-bridge.md)を参照してください。
+識別済みPCMを描画してACKする接続層は[ブラウザACK接続](docs/browser-playback-bridge.md)を参照してください。
 LiveKit RTPと元PCMの対応、およびネットワークRPC endpointは未実装です。

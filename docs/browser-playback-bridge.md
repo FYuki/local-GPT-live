@@ -1,6 +1,6 @@
 # ブラウザ描画と個別ACKの接続
 
-このローカル統合は、[純粋ACKコントローラー](../browser/README.md)と
+この統合は、[純粋ACKコントローラー](../browser/README.md)と
 [PR2の再生履歴契約](adr/0002-playback-ack.md)を接続します。
 識別済みPCMをAudioWorkletへ渡す経路が対象です。LiveKitのRTP音声をこのPCMへ
 変換する機能、認証済みRPCのネットワークendpoint、画面UIは含みません。
