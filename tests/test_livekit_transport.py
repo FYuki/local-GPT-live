@@ -521,3 +521,26 @@ async def test_invalid_wav_is_terminal_without_exposing_contents(rig, invalid_wa
     assert not rig.room.connected
     assert "synthetic-private-content" not in repr(rig.events) + caplog.text
     assert "playback_completed" not in [event.kind for event in rig.events]
+
+
+
+@pytest.mark.parametrize("url", [
+    "ws://localhost:7880", "ws://127.0.0.1:7880", "ws://[::1]:7880",
+    "ws://LOCALHOST:7880", "wss://fixture.invalid", "wss://192.0.2.1",
+    "wss://[2001:db8::1]",
+])
+def test_config_allows_explicit_loopback_ws_and_remote_wss(url):
+    config = livekit_transport.LiveKitConfig(url, "synthetic-token", "user", "PA-user")
+    assert config.url == url
+
+
+@pytest.mark.parametrize("url", [
+    "ws://fixture.invalid", "ws://192.0.2.1", "ws://192.168.1.10",
+    "ws://0.0.0.0", "ws://[::]", "ws://[2001:db8::1]",
+    "ws://localhost.fixture.invalid", "ws://127.0.0.1.fixture.invalid",
+    "ws://user:secret@localhost", "wss://user:secret@fixture.invalid",
+    "ws://localhost?token=secret", "wss://fixture.invalid#secret",
+])
+def test_config_rejects_cleartext_remote_urls_and_embedded_credentials(url):
+    with pytest.raises(ValueError, match="^invalid_livekit_config$"):
+        livekit_transport.LiveKitConfig(url, "synthetic-token", "user", "PA-user")

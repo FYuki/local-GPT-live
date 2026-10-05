@@ -32,7 +32,9 @@ class LiveKitConfig:
 
     def __post_init__(self) -> None:
         parsed = urlsplit(self.url)
+        loopback = parsed.hostname in {"localhost", "127.0.0.1", "::1"}
         if (parsed.scheme not in {"ws", "wss"} or not parsed.hostname
+                or (parsed.scheme == "ws" and not loopback)
                 or parsed.username or parsed.password or parsed.query or parsed.fragment
                 or not self.token.strip() or not self.participant_identity
                 or not self.participant_sid):

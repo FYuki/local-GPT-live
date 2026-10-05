@@ -21,7 +21,7 @@ uv sync --frozen --extra livekit
 
 | 設定 | 内容 |
 | --- | --- |
-| `url` | 利用が認められた既存 LiveKit の接続 URL |
+| `url` | 利用が認められた既存 LiveKit の接続 URL。原則 `wss://`。`ws://` は `localhost`・`127.0.0.1`・`[::1]` のみ許可 |
 | `token` | ホストが取得済みの接続 token。repr に含めず、ログや commit に保存しない |
 | `participant_identity` | 入力を許可する remote participant の identity |
 | `participant_sid` | 現在の remote participant の SID。同じ identity の再参加と区別する |
