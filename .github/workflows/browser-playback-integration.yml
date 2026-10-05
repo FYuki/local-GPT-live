@@ -1,0 +1,27 @@
+name: Playback bridge synthetic integration
+on:
+  pull_request:
+  push:
+    branches: [main, 'epic/**']
+permissions:
+  contents: read
+jobs:
+  bridge:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: astral-sh/setup-uv@v6
+        with:
+          version: '0.8.22'
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - run: uv sync --frozen --extra livekit
+      - run: node --check browser/playback-ack-bridge.mjs
+      - run: node --check browser/pcm-renderer.mjs
+      - run: node --check browser/pcm-renderer-worklet.mjs
+      - run: node --test browser/integration/playback-ack-bridge.test.mjs browser/integration/playback-ack-host.test.mjs
