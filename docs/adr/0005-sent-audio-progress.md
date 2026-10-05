@@ -1,0 +1,47 @@
+# ADR 0005: BE送出台帳による音声ブロック進捗の取得
+
+状態: 採用（取得API。推定によるSession自動完了・履歴更新は対象外）
+
+## 背景
+
+[LiveKit adapter](0003-livekit-adapter.md)の`SegmentSent`は、ブロック全体をSDKへ渡した
+論理sample範囲を通知する。ブロック途中での割込みや取消について、渡せた部分範囲と
+その時刻を取得する経路は別に必要となる。
+
+旧PoCには[BE送出位置による推定ADR](https://github.com/FYuki/digital-souls/blob/fce7382884d981c42be7fbd3ddaffe7469e27588/docs/decisions/voice-playback-estimation-speech-services-2026-09.md)と、
+[capture完了時刻台帳](https://github.com/FYuki/digital-souls/blob/fce7382884d981c42be7fbd3ddaffe7469e27588/backend/app/livekit_transport/paced_audio.py#L53)、
+[取消時のprefix取得](https://github.com/FYuki/digital-souls/blob/fce7382884d981c42be7fbd3ddaffe7469e27588/backend/app/livekit_transport/response_audio.py#L193)がある。
+ただし旧PoCはSDK queue 0msと独自pacerを使い、推定を履歴の正本へ採用していた。
+現在の100ms queueと[実再生ACK契約](0002-playback-ack.md)へ、その前提を暗黙に持ち込まない。
+
+## 決定
+
+1. `sent_audio_progress(response_id, at_ns=None)`で、当該応答の送出範囲と時間による推定を取得する。
+   PCMや本文は複製保存せず、response ID、当該出力作成時generation、track SID、
+   0始まりaudio sequence、sample範囲、BE単調時計の記述子を保持する。
+   track公開に成功して束縛できた最新の応答と直前の応答を対象とし、未公開・未知・
+   保持対象外のresponse IDには`None`を返す。
+2. SDKのframe書込みが正常完了した地点を送出記録の根拠とする。
+   TTS完了、queue投入、metadata通知を送出成功と見なさない。
+3. 判定時計から設定した下り遅延（既定300ms）と既存SDK queueの100msを差し引く。
+   frame推定終了は`max(capture成功時刻, 前frame推定終了) + frame音声時間`とし、
+   captureの瞬間的な連続成功や供給空白で進捗を水増ししない。
+4. 完全な連続ブロックprefixと部分ブロック範囲を分ける。
+   推定結果には`basis="sdk_submitted_elapsed"`と`real_playback_confirmed=False`を付ける。
+5. 取消・割込み・失効の時刻で台帳を固定し、後の経過時間や遅着captureで旧応答を進めない。
+   容量超過や時計逆行は既存transportの出力失敗として停止・資源回収へ進める。
+   既存記録を維持し、容量を超えた範囲を推測で埋めない。
+6. `SegmentSent`、既存の実再生ACK、Session完了、Core履歴の意味は維持する。
+   本APIの取得や推定通過を理由に、ACK・完了・履歴更新を発生させない。
+
+詳細な利用契約と推定式は[送出台帳の取得](../sent-audio-progress.md)を正とする。
+
+## 制約
+
+capture成功はSDK受理の事実であり、FE到達やブラウザ出力の証明ではない。
+固定下り遅延は仮定であり、ネットワーク損失、PLC、再生停止、端末muteを推定から検出できない。
+推定値と実際の出力の差は別の観測課題として残る。
+
+RTP音声transport、既存SDK依存、provider設定を変更せず、PCM別配送、認証発行、
+実接続、配備は行わない。Sessionの自動推定完了や履歴更新へ利用する場合は、
+この取得契約とは別に呼出側の扱いを定める。

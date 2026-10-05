@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import io
 import math
+import time
 import wave
 from collections.abc import Callable
 from dataclasses import dataclass, field
@@ -17,7 +18,11 @@ from .input import AudioInput
 from .livekit_input import LiveKitInput
 from .playback import AudioPacket, Playback
 from .session import Event
+from .sent_audio import SentAudioProgress, SentAudioScope, SentAudioSnapshot
 from .voice_input.session import InputGrant
+
+
+_OUTPUT_QUEUE_MS = 100
 
 
 @dataclass(frozen=True)
@@ -29,6 +34,7 @@ class LiveKitConfig:
     connect_timeout: float = 10
     close_timeout: float = 2
     output_ready_timeout: float = 3
+    estimated_downlink_delay: float = 0.3
 
     def __post_init__(self) -> None:
         parsed = urlsplit(self.url)
@@ -42,6 +48,10 @@ class LiveKitConfig:
         if any(not math.isfinite(t) or t <= 0
                for t in (self.connect_timeout, self.close_timeout, self.output_ready_timeout)):
             raise ValueError("invalid_livekit_timeout")
+        if (not math.isfinite(self.estimated_downlink_delay)
+                or self.estimated_downlink_delay < 0
+                or not math.isfinite(self.estimated_downlink_delay * 1e9)):
+            raise ValueError("invalid_livekit_estimated_delay")
 
 
 @dataclass(frozen=True)
@@ -87,6 +97,9 @@ class _Output:
     source: rtc.AudioSource
     track: rtc.LocalAudioTrack
     sample_rate: int
+    generation: int
+    progress: SentAudioProgress | None = None
+    scope: SentAudioScope | None = None
     sid: str | None = None
     samples: int = 0
     ready: asyncio.Event = field(default_factory=asyncio.Event)
@@ -105,6 +118,7 @@ class LiveKitTransport:
         self, audio: AudioInput, config: LiveKitConfig, *,
         on_segment: Callable[[SegmentSent], None] = lambda segment: None,
         on_track: Callable[[TrackPublished], None] = lambda track: None,
+        clock_ns: Callable[[], int] = time.monotonic_ns,
     ) -> None:
         playback = audio.session.playback
         if not isinstance(playback, LiveKitPlayback) or playback._attached:
@@ -117,6 +131,9 @@ class LiveKitTransport:
                                   config.participant_sid)
         self._on_segment = on_segment
         self._on_track = on_track
+        self._clock_ns = clock_ns
+        self._progress: tuple[str, SentAudioProgress] | None = None
+        self._previous_progress: tuple[str, SentAudioProgress] | None = None
         self._output: _Output | None = None
         self._pump: asyncio.Task[None] | None = None
         self._sending: asyncio.Task[None] | None = None
@@ -136,11 +153,23 @@ class LiveKitTransport:
         if self._output is not None:
             self._output.ready.set()
             try:
-                self._output.stop()
+                try:
+                    if self._output.progress is not None:
+                        self._output.progress.freeze(self._clock_ns())
+                finally:
+                    self._output.stop()
             except Exception:
                 self._report("output_stop_failed")
         # SDKのFFI完了を見失わないよう送信task自体は取消しない。
         # 遅着後にresponseを再照合してqueueを消し、公開SIDを回収する。
+
+    def sent_audio_progress(self, response_id: str, *,
+                            at_ns: int | None = None) -> SentAudioSnapshot | None:
+        """保持中の送出範囲と経過時間による推定を取得する。ACKは変更しない。"""
+        for entry in (self._progress, self._previous_progress):
+            if entry is not None and entry[0] == response_id:
+                return entry[1].snapshot(self._clock_ns() if at_ns is None else at_ns)
+        return None
 
     def cancel(self) -> None:
         self.audio.session.cancel()
@@ -279,7 +308,7 @@ class LiveKitTransport:
         if not self._current(packet.response_id):
             return
         if output is None:
-            source = rtc.AudioSource(rate, 1, queue_size_ms=100)
+            source = rtc.AudioSource(rate, 1, queue_size_ms=_OUTPUT_QUEUE_MS)
             try:
                 track = rtc.LocalAudioTrack.create_audio_track(
                     "ds-response-v1:" + packet.response_id, source,
@@ -287,7 +316,9 @@ class LiveKitTransport:
             except BaseException:
                 await source.aclose()
                 raise
-            output = self._output = _Output(packet.response_id, source, track, rate)
+            output = self._output = _Output(
+                packet.response_id, source, track, rate, self.audio.session.generation,
+            )
             publication = await self.room.local_participant.publish_track(
                 track, rtc.TrackPublishOptions(source=rtc.TrackSource.SOURCE_MICROPHONE, dtx=False),
             )
@@ -295,10 +326,27 @@ class LiveKitTransport:
             if not self._current(packet.response_id):
                 output.stop()
                 return
+            ledger = SentAudioProgress(
+                downlink_delay_ns=round(self.config.estimated_downlink_delay * 1e9),
+                sdk_queue_allowance_ns=_OUTPUT_QUEUE_MS * 1_000_000,
+            )
+            output.scope = ledger.begin(
+                response_id=packet.response_id, generation=output.generation,
+                track_sid=output.sid, sample_rate=rate,
+            )
+            output.progress = ledger
+            self._previous_progress = self._progress
+            self._progress = (packet.response_id, ledger)
             self._on_track(TrackPublished(packet.response_id, output.sid))
         if output.sample_rate != rate:
             raise ValueError("livekit_response_rate_changed")
         start = output.samples
+        progress, scope = output.progress, output.scope
+        if progress is None or scope is None:
+            raise RuntimeError("sent_audio_scope_unavailable")
+        if not progress.begin_block(scope=scope, audio_sequence=packet.sequence,
+                                    sample_start=start, sample_end=start + frames):
+            return
         try:
             async with asyncio.timeout(self.config.output_ready_timeout):
                 await output.ready.wait()
@@ -307,8 +355,16 @@ class LiveKitTransport:
                     return
                 chunk = pcm[offset:offset + (rate // 100) * 2]
                 await output.source.capture_frame(rtc.AudioFrame(chunk, rate, 1, len(chunk) // 2))
+                # native投入の成功だけを記録する。失効後の遅着は送出範囲へ足さない。
+                if not self._current(packet.response_id) or self._output is not output:
+                    return
+                end = output.samples + len(chunk) // 2
+                if not progress.record(scope=scope, audio_sequence=packet.sequence,
+                                       sample_start=output.samples, sample_end=end,
+                                       completed_at_ns=self._clock_ns()):
+                    return
+                output.samples = end
             if self._current(packet.response_id):
-                output.samples += frames
                 # sidはpublish成功後だけ設定される。送出観測をACKへ変換しない。
                 if output.sid is not None:
                     self._on_segment(SegmentSent(packet.response_id, packet.sequence, output.sid,

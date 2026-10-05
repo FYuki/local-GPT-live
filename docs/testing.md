@@ -26,6 +26,22 @@ provider integrationはHTTP mockとローカルloopback fixtureで契約と切�
 共有推論endpointがUbuntu-dogfoodにあっても、devの実行主体を置き換えない。
 合成入力による部分的な実接続結果は[Ubuntu検証証跡](evidence/2026-10-04-ubuntu-connections.md)を参照する。
 
+## 送出台帳と進捗推定の合成検証
+
+[送出済み音声ブロックの取得](sent-audio-progress.md)は、SDK書込み成功の範囲・時刻と
+経過時間による推定を検証する。実再生ACKを代用する試験ではない。
+
+```sh
+uv sync --frozen --extra livekit
+uv run --no-sync pytest -q tests/test_sent_audio.py tests/test_livekit_transport.py
+```
+
+偽SDK、合成PCM、制御した単調時計を使い、書込み成功前、部分送出、連続ブロックprefix、
+frame音声時間による制限、供給空白、取消・割込み後の固定、遅着capture、旧応答の分離、
+保持上限を確認する。取得や推定通過から実再生ACK・Session完了が発生しないことも確認する。
+下り遅延300msは初期仮定であり、この合成試験で実測・較正された値ではない。
+新しいtoken、LiveKit実接続、ブラウザ起動、マイク権限、共有サービス変更は不要。
+
 ## 実音声受入（別枠）
 
 1. 親作業者とGPU利用時間・Core版・共有STT/TTS endpointを固定する。サービス再設定はしない。
