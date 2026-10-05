@@ -1,0 +1,33 @@
+name: Browser playback ACK
+
+on:
+  pull_request:
+    paths:
+      - 'browser/playback-ack.mjs'
+      - 'browser/tests/playback-ack.test.mjs'
+      - 'browser/README.md'
+      - '.github/workflows/browser-ack.yml'
+      - 'docs/evidence/browser-playback-ack.md'
+  push:
+    branches: [main, 'epic/**']
+    paths:
+      - 'browser/playback-ack.mjs'
+      - 'browser/tests/playback-ack.test.mjs'
+      - 'browser/README.md'
+      - '.github/workflows/browser-ack.yml'
+      - 'docs/evidence/browser-playback-ack.md'
+
+permissions:
+  contents: read
+
+jobs:
+  node-checks:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - run: node --check browser/playback-ack.mjs
+      - run: node --test browser/tests/playback-ack.test.mjs

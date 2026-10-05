@@ -226,9 +226,15 @@ class VoiceSession:
                 except Exception:
                     self.emit(Event("provider_cleanup_failed", response_id))
 
+    def acknowledge_playback(self, response_id: str, sequence: int) -> bool:
+        """現在responseの実再生ACK。生成完了とは独立して受け付ける。"""
+        if self.active != response_id:
+            return False
+        return self.playback.acknowledge(response_id, sequence)
+
     def playback_completed(self, response_id: str) -> bool:
         if (self.active != response_id or self.generated != response_id
-                or self.playback.pending_bytes):
+                or not self.playback.all_confirmed):
             return False
         self.active = None
         self.playback.stop()
