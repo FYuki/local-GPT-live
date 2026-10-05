@@ -37,6 +37,25 @@ buffer pointer、rate、channel数、sample数をnativeへ渡し、`userdata`を
 公開Web文書の更新と固定版の差は実インストール版で確認する。
 SDK queue、`capture_frame`、`wait_for_playout`の完了は、遠隔ブラウザの出力証拠にしない。
 
+## ブラウザ側の補助観測候補
+
+`RTCRtpReceiver.getSynchronizationSources()`は、過去10秒に現れたSSRCごとの最新の
+RTP timestampとMediaStreamTrackへの配送時刻を返す。全packet履歴ではなく、sink未接続でも更新される。
+現行[WebRTC仕様](https://www.w3.org/TR/webrtc/#dom-rtcrtpreceiver-getsynchronizationsources)の配送時刻は
+`performance.timeOrigin + performance.now()`のmsである。AudioContextの時計と原点・単位を分け、
+対象ブラウザの実装を確認してから比較する。時刻が得られても実出力済みとはしない。
+
+調査した[LiveKit JS 2.22.1](https://github.com/livekit/client-sdk-js/blob/v2.22.1/src/room/track/RemoteTrack.ts)では
+`track.receiver`はinternal。補助候補の`TrackEvent.TimeSyncUpdate`もexperimentalで、
+`{timestamp, rtpTimestamp}`だけを通知する。rAFで先頭sourceを読み、同値とRTP timestamp 0は落とし、
+SSRCも返さないため、完全な区間対応には使えない。`registerTimeSyncUpdate()`は引数なし、
+observer解除は`off`で行う。このsliceではbrowser依存や観測実装を追加しない。
+
+[受信encoded transform](https://www.w3.org/TR/webrtc-encoded-transform/#rtcencodedframe)のmetadataも
+復号前の候補であり、PLC・速度調整後の各出力sampleとの対応は得られない。
+固定PoCのpacket別decoder→Workletは専用の出音経路で、標準audio要素はmuteしている。
+その出力時計通過は当該経路の証拠であり、標準track再生経路の同一性や元PCM帰属には読み替えない。
+
 ## 小さなオフラインハーネス
 
 `tools/rtp_observation.py`は、既存`SegmentSent`と公式SDKの`AudioFrame`、
