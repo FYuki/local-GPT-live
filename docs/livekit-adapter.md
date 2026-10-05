@@ -132,3 +132,7 @@ mute/focus/text/reconnect の device gate、echoCancellation/noiseSuppression、
 Ubuntu-dogfood の共有サービスや GPU の設定を変更せず、既存承認のない実接続を合成試験に混ぜない。
 
 [Ubuntu での合成検証結果](evidence/2026-10-05-livekit-adapter.md)を別途記録する。
+
+既存Ubuntu LiveKitでの合成PCM送受信・取消・切断は
+[実接続検証](evidence/2026-10-05-livekit-rtc.md)で確認した。
+ブラウザ実再生ACK・実マイク・実推論の受入とは区別する。
