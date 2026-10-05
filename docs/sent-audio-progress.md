@@ -1,7 +1,8 @@
-# BE送出済み音声ブロックの取得と進捗推定
+# BE送出済み音声ブロックの取得と出力終了の推定
 
 LiveKitへ渡した応答音声について、送出済みsample範囲とBEの経過時間から進捗を取得する。
 取得対象は音声ブロックの記述子であり、PCM本体や会話本文の複製保存ではない。
+LiveKit adapterはこの推定をSessionの「現在の応答が出力中か」という判断へ接続する。
 設計判断は[ADR 0005](adr/0005-sent-audio-progress.md)を参照する。
 
 ## APIと取得対象
@@ -120,16 +121,63 @@ transport内で台帳追記の上限超過や時計の逆行を検出した場�
 応答取消、queue消去、切断・資源回収を行い、既存の台帳を固定する。
 保持できない範囲を送出済みへ補ったり、記録を捨てながら通常送出を継続したりしない。
 
-## 既存ACK・Sessionとの関係
+## Sessionの出力中判定
 
-今回追加するのは取得APIと、そのための送出記録・進捗推定である。
-推定結果から`acknowledge_playback()`や`playback_completed()`を呼ばず、
-`Playback.all_confirmed`、Sessionの完了判定、Coreへ渡す履歴範囲を変更しない。
-生成が終わり推定上の全ブロックが通過しても、実再生ACKがなければ再生確認は未確定。
+LiveKit adapterがSessionへ推定の取得先を接続する。`sent_audio_progress()`自体は
+読み取りAPIのままであり、取得したことを理由にSessionを終了させない。
+推定の取得先を接続していないSessionへ、自動推定の動作を追加しない。
 
-[実再生ACK契約](adr/0002-playback-ack.md)と
-[ブラウザbridge](browser-playback-bridge.md)は既存の意味を維持する。
-PCM別配送への置換、browser UI、認証済みRPC endpointはこの変更に含まない。
+音声がある応答は、次の全条件を満たしてから`estimated_output_completed(response_id)`で
+出力中の状態を終了する。
+
+1. 現在のresponseと生成完了responseが一致し、Playbackも同じresponseを保持している。
+2. 生成完了までにenqueueしたブロック総数と、台帳の連続ブロック数・末尾sequenceが一致する。
+3. 全ブロックのSDK書込みが末尾まで成功し、全範囲が時間推定上の終了位置を通過している。
+4. snapshotのresponse、generationが現在の応答に対応し、取消で固定された台帳ではない。
+
+queueが空、`consume()`済み、登録済みブロックの`estimated_complete=True`という
+単独の条件では終了しない。登録されていない後続ブロックや、送出途中の最後のブロックを
+見落とさないため、生成完了時のenqueue数を別に照合する。
+生成完了かつenqueueが0件の応答は音声なしの終了として扱い、trackや架空のsampleを作らない。
+
+transportが持つ推定終了timerは同時に1件とし、生成完了と送出処理の終了後に設定する。
+台帳の`next_estimated_complete_at_ns()`が返す登録済み全ブロックの期限を使う。
+この期限だけでは生成完了を意味せず、新ブロックの追加や取消後に使い回さない。
+発火時にもresponseと出力の所有を再確認する。取消・切断・応答交代ではtimerを失効させ、
+旧callbackから新応答を終了させない。推定終了は入力の取消を伴わず、入力generationを進めず、
+生成taskを取り消さない。現在応答のactiveを終了する処理であり、Sessionは閉じず次の入力を受け付ける。
+
+正式な発話開始では`current_output_response()`が期限を再確認してからoverlapを捕捉する。
+期限後なのにtimerの実行が遅れている場合にも、終了済みの応答へ新発話を重ねて扱わない。
+捕捉したoverlapは、その後に推定終了やSTT完了があっても書き換えない。
+相槌かtake-turnかという既存の分類は、この発話開始時点の対応を使い続ける。
+
+## 取消時の推定と実再生ACK
+
+通常の推定終了と取消・割込みでは、出力停止後に固定した台帳を取得し、
+`Session.last_output_estimate`へ1件だけ保持する。
+本文やPCMを保存せず、Sessionの再生履歴DBや文字列prefixを追加しない。
+生成完了前の取消にも推定を残せるが、全応答を出力し終えた意味は持たない。
+まだ公開trackへ束縛していない応答や音声なしの応答はsnapshotがなく、値は`None`となる。
+取消でsnapshotを取得できなかった場合は`output_estimated_stopped`を発行しない。
+
+| event | `detail` | 意味 |
+| --- | --- | --- |
+| `output_estimated_completed` | `sdk_submitted_elapsed` | 生成・全送出・時間推定の条件による出力中状態の終了 |
+| `output_estimated_completed` | `no_audio` | 生成完了し、音声ブロックがなかった応答の終了 |
+| `output_estimated_stopped` | 取消・割込みのreason | 停止時の推定prefixを取得・保持 |
+| `playback_completed` | 従来どおり | 実再生ACK条件による終了 |
+
+共通の出力失効hookは台帳の固定を担当し、取消eventを発行しない。
+推定の通常終了から`output_estimated_stopped`を重ねて発行しない。
+
+推定終了では`acknowledge_playback()`や`playback_completed()`を呼ばず、ACKを受け取ったことにしない。
+snapshotの`real_playback_confirmed=False`も維持する。推定でactiveを終了した後に届く
+旧responseのACKは、従来のactive照合によって拒否される。
+
+[実再生ACK契約](adr/0002-playback-ack.md)の受付検証と
+[ブラウザbridge](browser-playback-bridge.md)のACKの意味は維持する。
+PCM別配送への置換、browser UI、認証済みRPC endpoint、Core履歴の更新はこの変更に含まない。
 
 ## 旧PoCとの対応
 
@@ -145,7 +193,8 @@ PCM別配送への置換、browser UI、認証済みRPC endpointはこの変更�
 
 旧PoCはSDK queueを0msにし、独自の10ms pacerで送出していた。今回は既存adapterの
 100ms queueを維持するため、queue分と音声時間を推定モデルへ明示的に含める。
-旧PoCが推定値を応答終了・履歴へ採用する部分は、今回の取得APIへ移植しない。
+旧PoCと同じくBEの推定で出力中の状態を終了できるようにするが、推定値を会話履歴の
+文字列prefixへ変換・保存する部分は持ち込まない。
 旧PoCの[受入記録](https://github.com/FYuki/digital-souls/blob/fce7382884d981c42be7fbd3ddaffe7469e27588/docs/validation/issue-3-acceptance-20260929.md)
 でも推定値と実会話出力の差分計測は未実施であり、既定300msを測定済み性能値としない。
 
@@ -153,7 +202,9 @@ PCM別配送への置換、browser UI、認証済みRPC endpointはこの変更�
 
 合成PCMと偽SDK、制御した単調時計で、送出成功前の0進捗、部分ブロック、連続prefix、
 frame音声時間、供給空白、取消後の固定、遅着capture、応答交代、保持上限を確認する。
-推定結果を取得しても実再生ACKやSession完了が生じないことも検証する。
+読み取りだけで状態が変わらないことと、推定終了の全条件・空応答・timer失効・
+次発話のoverlap捕捉・取消prefix保持を検証する。推定終了から実再生ACKや
+`playback_completed`を生成しないことも確認する。
 実行手順は[検証と実音声受入](testing.md)を参照する。
 
 この検証ではLiveKit接続、token発行、サービス変更、ブラウザやマイクの起動は行わない。

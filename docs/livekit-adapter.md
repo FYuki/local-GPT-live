@@ -28,6 +28,7 @@ uv sync --frozen --extra livekit
 | `connect_timeout` | 接続を待つ秒数。既定 10 秒 |
 | `close_timeout` | リソースの終了処理を待つ秒数。既定 2 秒 |
 | `output_ready_timeout` | 出力 track の端末準備完了を待つ秒数。既定 3 秒 |
+| `estimated_downlink_delay` | 出力進捗の推定に置く下り遅延の仮定。既定0.3秒、非負・有限でns換算可能な値 |
 
 token の発行や既存サービスの設定変更はこの API の責務に含めない。
 
@@ -106,8 +107,12 @@ response ごとの出力 track 名は `ds-response-v1:<response_id>`。
 この通知は配信側の事実であり、端末で聞こえた範囲を保証しない。
 
 アダプターは ACK を受信せず、`playback_completed` を呼ばない。
-生成や SDK 送信が終わっても実再生完了とせず、response は後続の取消や新回答で失効できる。
-別担当のブラウザ ACK モジュールと Backend ACK 契約を接続するまで、実再生完了経路は未実装となる。
+[送出台帳と時間推定](sent-audio-progress.md)をSessionへ接続し、生成完了・全ブロックの
+SDK投入成功・推定終了時刻の通過を確認して、`output_estimated_completed`を発行する。
+正式発話開始時にも同じ条件を確認し、出力中のresponseをoverlap対象として捕捉する。
+取消・割込みでは、固定した推定範囲を`session.last_output_estimate`から取得できる。
+これらは実再生の確認とは別であり、ACK状態を真にせず、本文やCore履歴を補完しない。
+推定終了後に旧responseへ届くACKは、active失効により受け付けない。
 
 ## 合成試験と実接続受入
 
@@ -127,7 +132,8 @@ uv run --no-sync python tools/check_docs.py
 
 実接続には、ホストによる参加者認証、受信統計と PCM 欠落検査の実通信受入、5 秒以内の入力 ACK、
 mute/focus/text/reconnect の device gate、echoCancellation/noiseSuppression、
-出力 track の購読・再生準備完了をホスト API へ伝える経路、実再生 ACK が必要。
+出力 track の購読・再生準備完了をホスト API へ伝える経路が必要。
+実再生ACKは推定と比較する別の観測経路とし、推定による出力終端の必須条件にはしない。
 これらを揃えた後、親作業者と既存 endpoint・利用時間・実マイク受入条件を確認する。
 Ubuntu-dogfood の共有サービスや GPU の設定を変更せず、既存承認のない実接続を合成試験に混ぜない。
 

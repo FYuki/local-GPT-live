@@ -33,7 +33,12 @@ Coreへはaliasと確定textを送る。人格prompt、tool実行、長期記憶
 - 相槌/曖昧反応は旧回答を継続する。take_turn、明示cancel、text優先、reconnectで旧出力を失効させる。
 - 停止順序は出力失効・queue消去→playback_stopped→生成task取消→response_cancelled。
   遅いprovider完了はactive responseを再照合する。出力packetにもresponse_id/sequenceを付ける。
-- generation_completed後も未再生の回答は取消可能。配信済み区間を0始まりの連続番号で
+- LiveKit adapterは[送出台帳と経過時間](sent-audio-progress.md)をSessionへ接続し、生成完了・
+  全ブロックのSDK投入・推定時刻の通過で`output_estimated_completed`としてactiveを終了する。
+  発話開始時にもこの条件を確認してoverlapを捕捉し、捕捉後は書き換えない。入力世代は維持する。
+  取消・割込み時は固定した完全ブロックprefixと部分範囲を1件保持する。文字数や履歴を推測で補わない。
+- 推定取得先を接続しない基底Sessionでは、generation_completed後も未確認の回答は取消可能。
+  配信済み区間を0始まりの連続番号で
   acknowledge_playbackへACKし、全区間を確認してからplayback_completedで終端へ進む。
   consumeやqueueの空だけでは再生完了にしない。[Backend受付契約](adr/0002-playback-ack.md)を参照。
 - `Playback.consume`は端末への引渡しであり、実出音の証拠ではない。実adapterはstop時にデバイスqueueも消す。

@@ -278,3 +278,70 @@ def test_fractional_nanosecond_duration_rounds_up_without_early_prefix():
     duration_ns = (SECOND + 44100 - 1) // 44100
     assert progress.snapshot(duration_ns - 1).estimated_sample_end == 0
     assert progress.snapshot(duration_ns).estimated_sample_end == 1
+
+
+def test_completion_deadline_requires_all_planned_blocks_to_be_submitted():
+    assert SentAudioProgress().next_estimated_complete_at_ns() is None
+    progress, scope = ledger()
+    assert progress.next_estimated_complete_at_ns() is None
+    block(progress, scope)
+    assert progress.next_estimated_complete_at_ns() is None
+    record(progress, scope)
+    assert progress.next_estimated_complete_at_ns() is None
+    record(progress, scope, start=160, end=320)
+    deadline = progress.next_estimated_complete_at_ns()
+    assert deadline == SECOND + 420 * MS
+    assert not progress.snapshot(deadline - 1).estimated_complete
+    assert progress.snapshot(deadline).estimated_complete
+    original = progress.snapshot(deadline)
+    assert progress.next_estimated_complete_at_ns() == deadline
+    assert progress.snapshot(deadline) == original
+
+
+def test_new_block_invalidates_prior_deadline_and_gap_delays_recomputed_deadline():
+    progress, scope = ledger()
+    block(progress, scope, end=160)
+    record(progress, scope)
+    first_deadline = progress.next_estimated_complete_at_ns()
+    assert first_deadline == SECOND + 410 * MS
+    block(progress, scope, sequence=1, start=160, end=480)
+    assert progress.next_estimated_complete_at_ns() is None
+    assert not progress.snapshot(first_deadline).estimated_complete
+    record(progress, scope, sequence=1, start=160, end=320, at=10 * SECOND)
+    assert progress.next_estimated_complete_at_ns() is None
+    record(progress, scope, sequence=1, start=320, end=480, at=10 * SECOND)
+    final_deadline = progress.next_estimated_complete_at_ns()
+    assert final_deadline == 10 * SECOND + 420 * MS
+    assert not progress.snapshot(final_deadline - 1).estimated_complete
+    assert progress.snapshot(final_deadline).estimated_complete
+
+
+def test_freeze_and_new_scope_remove_completion_deadline_without_progress_side_effect():
+    progress, scope = ledger()
+    block(progress, scope, end=160)
+    record(progress, scope)
+    deadline = progress.next_estimated_complete_at_ns()
+    progress.freeze(deadline)
+    assert progress.next_estimated_complete_at_ns() is None
+    assert progress.snapshot(deadline + SECOND).estimated_complete
+    scope = progress.begin(response_id="next", generation=5, track_sid="next-track",
+                           sample_rate=16000)
+    assert progress.next_estimated_complete_at_ns() is None
+    block(progress, scope, end=160)
+    record(progress, scope, at=2 * SECOND)
+    assert progress.next_estimated_complete_at_ns() == 2 * SECOND + 410 * MS
+
+
+def test_completion_deadline_keeps_fractional_rounding_and_duplicate_capture_time():
+    progress = SentAudioProgress(downlink_delay_ns=7, sdk_queue_allowance_ns=11)
+    scope = progress.begin(response_id="response", generation=0, track_sid="track",
+                           sample_rate=44100)
+    block(progress, scope, end=2)
+    record(progress, scope, end=1, at=0)
+    record(progress, scope, start=1, end=2, at=0)
+    deadline = progress.next_estimated_complete_at_ns()
+    assert deadline == 2 * ((SECOND + 44100 - 1) // 44100) + 18
+    assert record(progress, scope, start=1, end=2, at=SECOND)
+    assert progress.next_estimated_complete_at_ns() == deadline
+    assert not progress.snapshot(deadline - 1).estimated_complete
+    assert progress.snapshot(deadline).estimated_complete

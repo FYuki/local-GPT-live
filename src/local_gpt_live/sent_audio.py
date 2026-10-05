@@ -171,6 +171,18 @@ class SentAudioProgress:
         self._submitted_end = sample_end
         return True
 
+    def next_estimated_complete_at_ns(self) -> int | None:
+        """登録済み全blockの推定完了期限。生成・応答の完了は判定しない。
+
+        timer発火時も現行scope、生成状態、全予定blockを呼出側で再照合する。
+        新blockの追加や凍結で、以前取得した期限は失効しうる。
+        """
+        if (self._scope is None or self._frozen_at_ns is not None
+                or not self._blocks or not self._frames
+                or self._submitted_end != self._blocks[-1].end):
+            return None
+        return self._frames[-1].estimated_end_ns + self._delay_ns
+
     def snapshot(self, at_ns: int) -> SentAudioSnapshot:
         if not _integer(at_ns):
             raise ValueError("invalid_sent_audio_query_time")

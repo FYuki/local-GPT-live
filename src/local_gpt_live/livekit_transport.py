@@ -85,6 +85,10 @@ class LiveKitPlayback(Playback):
             self._wake.set()
         return accepted
 
+    def generation_completed(self, response_id: str) -> None:
+        if self.active == response_id:
+            self._wake.set()
+
     def stop(self) -> None:
         super().stop()
         self._invalidate()
@@ -143,6 +147,8 @@ class LiveKitTransport:
         self._disconnecting = False
         self._disconnect_lock = asyncio.Lock()
         self._handlers: list[tuple[EventTypes, Callable[..., None]]] = []
+        self._completion_timer: asyncio.TimerHandle | None = None
+        audio.session.set_output_estimator(self.sent_audio_progress)
         playback._invalidate = self._invalidate
         playback._attached = True
 
@@ -150,6 +156,9 @@ class LiveKitTransport:
         self.audio.session.emit(Event("transport_failed", detail=reason))
 
     def _invalidate(self) -> None:
+        if self._completion_timer is not None:
+            self._completion_timer.cancel()
+            self._completion_timer = None
         if self._output is not None:
             self._output.ready.set()
             try:
@@ -265,6 +274,39 @@ class LiveKitTransport:
         finally:
             await output.source.aclose()
 
+    def _schedule_estimated_completion(self) -> None:
+        if self._completion_timer is not None:
+            self._completion_timer.cancel()
+            self._completion_timer = None
+        session = self.audio.session
+        response_id = session.active
+        if (response_id is None or not self._current(response_id)
+                or session.generated != response_id
+                or self.playback.pending_bytes or self._sending is not None):
+            return
+        if self.playback.last_audio_sequence < 0:
+            session.estimated_output_completed(response_id)
+            return
+        output = self._output
+        if output is None or output.response_id != response_id or output.progress is None:
+            return
+        deadline = output.progress.next_estimated_complete_at_ns()
+        if deadline is None:
+            return
+        now = self._clock_ns()
+        if deadline <= now:
+            session.estimated_output_completed(response_id)
+        else:
+            self._completion_timer = asyncio.get_running_loop().call_later(
+                (deadline - now) / 1e9, self._finish_estimated_output, output,
+            )
+
+    def _finish_estimated_output(self, output: _Output) -> None:
+        # 旧timerや同tickの発話開始更新で、次応答を完了させない。
+        if self._output is not output or not self._current(output.response_id):
+            return
+        self._schedule_estimated_completion()
+
     async def _run_output(self) -> None:
         try:
             while not self._closed:
@@ -281,6 +323,7 @@ class LiveKitTransport:
                             return
                     finally:
                         self._sending = None
+                self._schedule_estimated_completion()
         except asyncio.CancelledError:
             raise
         except Exception:

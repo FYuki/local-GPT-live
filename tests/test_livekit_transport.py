@@ -791,3 +791,256 @@ def test_config_allows_zero_estimated_downlink_delay_and_defaults_to_300ms():
     config = livekit_transport.LiveKitConfig("wss://fixture.invalid", "synthetic-token", "user",
                                             "PA-user", estimated_downlink_delay=0)
     assert config.estimated_downlink_delay == 0
+
+
+async def test_estimated_output_ends_at_audio_deadline_once_without_ack(rig):
+    await rig.transport.connect()
+    response_id = rig.session.submit_text("合成入力")
+    generation = rig.session.generation
+    await rig.session.drain()
+    await eventually(lambda: len(rig.segments) == 1)
+    output = rig.transport._output
+    await eventually(lambda: rig.transport._completion_timer is not None)
+    deadline = output.progress.next_estimated_complete_at_ns()
+    assert deadline == 1_425_000_000
+    rig.now_ns = deadline - 1
+    rig.transport._finish_estimated_output(output)
+    assert rig.session.active == response_id
+    assert rig.session.playback.confirmed_sequence == -1
+    rig.now_ns = deadline
+    rig.transport._finish_estimated_output(output)
+    rig.transport._finish_estimated_output(output)
+    assert rig.session.active is None
+    assert rig.session.generation == generation
+    assert rig.session.last_output_estimate.response_id == response_id
+    assert rig.session.last_output_estimate.estimated_sample_end == 400
+    assert rig.session.last_output_estimate.real_playback_confirmed is False
+    assert rig.session.playback.confirmed_sequence == -1
+    assert not rig.session.acknowledge_playback(response_id, 0)
+    assert not rig.session.playback_completed(response_id)
+    assert rig.transport._completion_timer is None
+    assert [(event.kind, event.detail) for event in rig.events
+            if event.kind == "output_estimated_completed"] == [
+        ("output_estimated_completed", "sdk_submitted_elapsed"),
+    ]
+    assert not any(event.kind in {"playback_completed", "output_estimated_stopped"}
+                   for event in rig.events)
+    await eventually(lambda: rig.sources[0].close_calls == 1)
+    assert rig.sources[0].queue == []
+
+
+async def test_estimated_output_timer_uses_real_monotonic_elapsed_time(rig):
+    import time
+    from dataclasses import replace
+
+    rig.transport._clock_ns = time.monotonic_ns
+    rig.transport.config = replace(rig.transport.config, estimated_downlink_delay=0)
+    rig.tts.wav = wav_bytes(frames=160)
+    await rig.transport.connect()
+    response_id = rig.session.submit_text("合成入力")
+    await eventually(lambda: len(rig.segments) == 1)
+    first = rig.transport.sent_audio_progress(response_id).blocks[0].first_submitted_at_ns
+    assert rig.session.active == response_id
+    await eventually(lambda: rig.session.active is None)
+    progress = rig.session.last_output_estimate
+    assert progress.frozen_at_ns - first >= 110_000_000
+    assert progress.estimated_sample_end == 160
+    assert not progress.real_playback_confirmed
+
+
+async def test_estimated_output_waits_for_pending_capture_and_does_not_credit_wait_time(rig):
+    gate = rig.capture_gate = rig.gate()
+    await rig.transport.connect()
+    response_id = rig.session.submit_text("合成入力")
+    await gate.entered.wait()
+    await rig.session.drain()
+    rig.now_ns = 100_000_000_000
+    assert rig.session.generated == response_id
+    assert rig.session.playback.pending_bytes == 0
+    assert rig.transport.sent_audio_progress(response_id).submitted_sample_end == 0
+    assert not rig.session.estimated_output_completed(response_id)
+    assert rig.transport._completion_timer is None
+    gate.release.set()
+    await eventually(lambda: len(rig.segments) == 1)
+    await eventually(lambda: rig.transport._completion_timer is not None)
+    output = rig.transport._output
+    deadline = output.progress.next_estimated_complete_at_ns()
+    assert deadline == 100_425_000_000
+    rig.now_ns = deadline - 1
+    rig.transport._finish_estimated_output(output)
+    assert rig.session.active == response_id
+    rig.now_ns = deadline
+    rig.transport._finish_estimated_output(output)
+    assert rig.session.active is None
+
+
+async def test_estimated_output_waits_for_generation_and_resets_time_after_audio_gap(rig):
+    gate = rig.gate()
+
+    class Core:
+        async def stream(self, text):
+            yield "一。"
+            await gate.wait()
+            yield "二。"
+
+    rig.session.core = Core()
+    await rig.transport.connect()
+    response_id = rig.session.submit_text("合成入力")
+    await gate.entered.wait()
+    await eventually(lambda: len(rig.segments) == 1)
+    output = rig.transport._output
+    rig.now_ns = 100_000_000_000
+    assert rig.transport.sent_audio_progress(response_id).estimated_complete
+    assert rig.session.generated is None
+    assert not rig.session.estimated_output_completed(response_id)
+    assert rig.transport._completion_timer is None
+    gate.release.set()
+    await rig.session.drain()
+    await eventually(lambda: len(rig.segments) == 2)
+    await eventually(lambda: rig.transport._completion_timer is not None)
+    assert rig.session.active == response_id
+    assert output.progress.next_estimated_complete_at_ns() == 100_425_000_000
+    assert rig.transport.sent_audio_progress(response_id).estimated_audio_sequence == 0
+    rig.now_ns = 100_425_000_000
+    rig.transport._finish_estimated_output(output)
+    assert rig.session.active is None
+
+
+async def test_cancel_invalidates_estimated_timer_and_old_callback_cannot_end_next_response(rig):
+    await rig.transport.connect()
+    old_id = rig.session.submit_text("旧応答")
+    await eventually(lambda: rig.transport._completion_timer is not None)
+    old_output = rig.transport._output
+    old_timer = rig.transport._completion_timer
+    rig.now_ns = 1_415_000_000
+    old_generation = rig.session.generation
+    rig.transport.cancel()
+    frozen = rig.session.last_output_estimate
+    assert frozen.response_id == old_id
+    assert frozen.generation == old_generation
+    assert rig.session.generation > frozen.generation
+    assert frozen.estimated_sample_end == 160
+    assert frozen.estimated_audio_sequence == -1
+    assert old_timer.cancelled()
+    assert rig.transport._completion_timer is None
+    new_id = rig.session.submit_text("新応答")
+    await eventually(lambda: len(rig.segments) == 2)
+    await eventually(lambda: rig.transport._completion_timer is not None)
+    new_timer = rig.transport._completion_timer
+    rig.now_ns = 100_000_000_000
+    rig.transport._finish_estimated_output(old_output)
+    assert rig.session.active == new_id
+    assert rig.transport._completion_timer is new_timer
+    assert rig.session.last_output_estimate == frozen
+    await rig.transport.aclose()
+    assert new_timer.cancelled()
+    assert rig.transport._completion_timer is None
+
+
+async def test_confirmed_playback_can_finish_first_and_invalidates_estimated_timer(rig):
+    await rig.transport.connect()
+    response_id = rig.session.submit_text("合成入力")
+    await eventually(lambda: rig.transport._completion_timer is not None)
+    output, timer = rig.transport._output, rig.transport._completion_timer
+    assert rig.session.acknowledge_playback(response_id, 0)
+    assert rig.session.playback_completed(response_id)
+    assert timer.cancelled()
+    rig.now_ns = 100_000_000_000
+    rig.transport._finish_estimated_output(output)
+    assert sum(event.kind == "playback_completed" for event in rig.events) == 1
+    assert not any(event.kind == "output_estimated_completed" for event in rig.events)
+
+
+async def test_formal_utterance_started_after_estimated_deadline_has_no_old_overlap(rig):
+    from local_gpt_live.voice_input.detector import Detection
+    from local_gpt_live.voice_input.session import SpeechBoundary
+
+    await rig.transport.connect()
+    old_id = rig.session.submit_text("旧応答")
+    await eventually(lambda: rig.transport._completion_timer is not None)
+    output = rig.transport._output
+    rig.now_ns = output.progress.next_estimated_complete_at_ns()
+    grant = await rig.audio.open(track_sid="TR-input", request_id="input", revision=1)
+    pcm = b"\x01\x04" * 1600
+    rig.session.stt.transcripts[pcm] = "うん"
+    rig.audio._preroll.extend(pcm)
+    boundary = SpeechBoundary("utterance", grant, Detection("confirmed", 0, 1600, 1600))
+    generation = rig.session.generation
+    rig.audio._started(boundary)
+    assert rig.audio._overlap is None
+    assert rig.session.active is None
+    assert rig.session.generation == rig.audio._generation == generation
+    rig.transport._finish_estimated_output(output)
+    await rig.audio._stopped(boundary)
+    await rig.session.drain()
+    assert rig.session.active is not None and rig.session.active != old_id
+    assert not any(event.kind == "turn_decision" for event in rig.events)
+    assert sum(event.kind == "output_estimated_completed" for event in rig.events) == 1
+
+
+@pytest.mark.parametrize("text,new_response", [("うん", False), ("別の質問です", True)])
+async def test_formal_utterance_keeps_start_overlap_when_estimate_ends_during_speech(
+    rig, text, new_response,
+):
+    from local_gpt_live.voice_input.detector import Detection
+    from local_gpt_live.voice_input.session import SpeechBoundary
+
+    await rig.transport.connect()
+    old_id = rig.session.submit_text("旧応答")
+    await eventually(lambda: rig.transport._completion_timer is not None)
+    output = rig.transport._output
+    grant = await rig.audio.open(track_sid="TR-input", request_id="input", revision=1)
+    pcm = b"\x01\x04" * 1600
+    rig.session.stt.transcripts[pcm] = text
+    rig.audio._preroll.extend(pcm)
+    boundary = SpeechBoundary("utterance", grant, Detection("confirmed", 0, 1600, 1600))
+    rig.audio._started(boundary)
+    assert rig.audio._overlap == old_id
+    generation = rig.session.generation
+    rig.now_ns = output.progress.next_estimated_complete_at_ns()
+    rig.transport._finish_estimated_output(output)
+    assert rig.session.active is None
+    assert rig.session.generation == generation
+    assert rig.audio._overlap == old_id
+    await rig.audio._stopped(boundary)
+    await rig.session.drain()
+    assert (rig.session.active is not None) is new_response
+    decision = [event for event in rig.events if event.kind == "turn_decision"]
+    assert len(decision) == 1 and decision[0].response_id == old_id
+    assert decision[0].detail == ("take_turn" if new_response else "backchannel")
+
+
+async def test_estimated_output_empty_response_finishes_without_track(rig):
+    class EmptyCore:
+        async def stream(self, text):
+            if False:
+                yield ""
+
+    rig.session.core = EmptyCore()
+    await rig.transport.connect()
+    response_id = rig.session.submit_text("合成入力")
+    await rig.session.drain()
+    await eventually(lambda: rig.session.active is None)
+    assert rig.sources == rig.segments == []
+    assert rig.transport.sent_audio_progress(response_id) is None
+    assert rig.session.last_output_estimate is None
+    assert [(event.kind, event.detail) for event in rig.events
+            if event.kind == "output_estimated_completed"] == [
+        ("output_estimated_completed", "no_audio"),
+    ]
+
+
+async def test_estimated_output_does_not_turn_provider_failure_into_empty_success(rig):
+    class FailedCore:
+        async def stream(self, text):
+            raise RuntimeError("synthetic-provider-failure")
+            yield ""
+
+    rig.session.core = FailedCore()
+    await rig.transport.connect()
+    rig.session.submit_text("合成入力")
+    await rig.session.drain()
+    assert rig.session.active is None
+    assert rig.transport._completion_timer is None
+    assert any(event.kind == "response_failed" for event in rig.events)
+    assert not any(event.kind == "output_estimated_completed" for event in rig.events)

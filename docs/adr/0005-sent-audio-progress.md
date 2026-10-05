@@ -1,6 +1,17 @@
-# ADR 0005: BE送出台帳による音声ブロック進捗の取得
+# ADR 0005: BE送出台帳による音声進捗と出力終了の推定
 
-状態: 採用（取得API。推定によるSession自動完了・履歴更新は対象外）
+状態: 採用（取得APIとSessionの出力中判定。会話履歴更新は対象外）
+
+## 既存ADRとの優先関係
+
+本ADRは、LiveKit adapterへ接続したSessionの出力中判定について次の範囲を更新する。
+それ以外の認証、所有、入力世代、実再生ACK、ブラウザ描画の契約は維持する。
+
+| 既存ADR | 本ADRが更新する範囲 |
+| --- | --- |
+| [ADR 0002](0002-playback-ack.md) | 実再生ACKによる`playback_completed()`に加え、別名の推定終了経路でactiveを閉じる。閉じたresponseの旧ACKは失効する。実再生ACKの受付条件や証拠を変更せず、経過時間からACKを作らない |
+| [ADR 0003](0003-livekit-adapter.md) | BE送出と時間による推定を採用しないという判断を、本台帳とSession出力終了に限って置き換える。既存100ms queue、output-ready gate、RTP送信、取消順序は維持する |
+| [ADR 0004](0004-browser-playback-bridge.md) | bridgeの実再生確認契約を維持しつつ、推定終了後はactive失効により旧ACK・完了通知を受け付けない。推定をbridgeの実測証拠やPCM/RTP対応付けに使わない |
 
 ## 背景
 
@@ -31,8 +42,15 @@
 5. 取消・割込み・失効の時刻で台帳を固定し、後の経過時間や遅着captureで旧応答を進めない。
    容量超過や時計逆行は既存transportの出力失敗として停止・資源回収へ進める。
    既存記録を維持し、容量を超えた範囲を推測で埋めない。
-6. `SegmentSent`、既存の実再生ACK、Session完了、Core履歴の意味は維持する。
-   本APIの取得や推定通過を理由に、ACK・完了・履歴更新を発生させない。
+6. 取得先を接続したSessionでは、生成完了、全enqueueブロックのSDK書込み成功、
+   全ブロックの推定終了を照合して、現在の出力中状態を終了する。
+   空応答は生成完了とenqueue 0件を確認し、音声なしとして終了する。
+   取得だけでは状態を変えず、単一の所有timerと発話開始時の期限再確認から同じguardを通す。
+7. 通常の推定終了と取消・割込み時の固定した台帳は、`last_output_estimate`へ1件のmetadataとして保持する。
+   Sessionの入力generationを通常の推定終了では進めず、発話開始時のoverlapを以後書き換えない。
+8. 推定終了・停止は`output_estimated_completed`・`output_estimated_stopped`として通知し、
+   実再生ACKや`playback_completed`を合成しない。`SegmentSent`とACKの受付検証は維持する。
+   推定終了でactiveが閉じた後の旧responseのACKは失効する。Core履歴や本文prefixの保存は追加しない。
 
 詳細な利用契約と推定式は[送出台帳の取得](../sent-audio-progress.md)を正とする。
 
@@ -43,5 +61,5 @@ capture成功はSDK受理の事実であり、FE到達やブラウザ出力の�
 推定値と実際の出力の差は別の観測課題として残る。
 
 RTP音声transport、既存SDK依存、provider設定を変更せず、PCM別配送、認証発行、
-実接続、配備は行わない。Sessionの自動推定完了や履歴更新へ利用する場合は、
-この取得契約とは別に呼出側の扱いを定める。
+実接続、配備は行わない。推定を会話履歴へ利用する場合は、本文との対応と保存の契約を
+別に定める。Sessionの出力中判定が終了したことを、実ブラウザ出力の確認とは扱わない。
