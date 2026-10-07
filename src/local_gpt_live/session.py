@@ -8,6 +8,7 @@ from typing import Protocol
 from uuid import uuid4
 
 from .playback import AudioPacket, Playback
+from .sent_audio import SentAudioSnapshot
 from .stt_audio import prepare_stt_audio
 from .turn_decision import classify_turn
 
@@ -57,6 +58,22 @@ class VoiceSession:
         self._input_task: asyncio.Task[None] | None = None
         self._responses: dict[str, asyncio.Task[None]] = {}
         self._stt_lock = asyncio.Lock()
+        self._output_estimator: Callable[[str], SentAudioSnapshot | None] | None = None
+        self.last_output_estimate: SentAudioSnapshot | None = None
+
+    def set_output_estimator(
+        self, estimate: Callable[[str], SentAudioSnapshot | None],
+    ) -> None:
+        """応答開始前に、所有transportのBE送出台帳を一度だけ接続する。"""
+        if self._closed or self.active is not None or self._output_estimator is not None:
+            raise ValueError("output_estimator_attach_before_response")
+        self._output_estimator = estimate
+
+    def current_output_response(self) -> str | None:
+        """正式発話開始時に、同じ送出・時間条件で出力中の応答を求める。"""
+        if self.active is not None:
+            self.estimated_output_completed(self.active)
+        return self.active
 
     @property
     def can_preview(self) -> bool:
@@ -209,6 +226,7 @@ class VoiceSession:
                 if self.active == response_id:
                     self.generated = response_id
                     self.emit(Event("generation_completed", response_id))
+                    self.playback.generation_completed(response_id)
         except asyncio.CancelledError:
             raise
         except Exception as error:
@@ -241,11 +259,49 @@ class VoiceSession:
         self.emit(Event("playback_completed", response_id))
         return True
 
+    def _record_output_estimate(self, response_id: str) -> None:
+        if self._output_estimator is not None:
+            progress = self._output_estimator(response_id)
+            self.last_output_estimate = (
+                progress if progress is not None and progress.response_id == response_id
+                else None
+            )
+
+    def estimated_output_completed(self, response_id: str) -> bool:
+        """送出範囲と経過時間で出力を終える。実再生ACKの状態は進めない。"""
+        if (self._closed or self._output_estimator is None
+                or self.active != response_id or self.generated != response_id
+                or self.playback.active != response_id or self.playback.pending_bytes):
+            return False
+        last = self.playback.last_audio_sequence
+        if last >= 0:
+            progress = self._output_estimator(response_id)
+            if (progress is None or progress.response_id != response_id
+                    or progress.generation != self.generation
+                    or progress.frozen_at_ns is not None
+                    or len(progress.blocks) != last + 1
+                    or progress.estimated_audio_sequence != last
+                    or not progress.estimated_complete
+                    or any(block.audio_sequence != sequence
+                           or block.submitted_sample_end != block.sample_end
+                           for sequence, block in enumerate(progress.blocks))):
+                return False
+        # 音声なしは旧PoCと同じ生成終端。入力世代を進めず発話を捨てない。
+        self.active = None
+        self.playback.stop()
+        self._record_output_estimate(response_id)
+        self.emit(Event("output_estimated_completed", response_id,
+                        "sdk_submitted_elapsed" if last >= 0 else "no_audio"))
+        return True
+
     def _cancel_response(self, reason: str) -> None:
         response_id, self.active = self.active, None
         self.generated = None
         self.playback.stop()
         if response_id is not None:
+            self._record_output_estimate(response_id)
+            if self.last_output_estimate is not None:
+                self.emit(Event("output_estimated_stopped", response_id, reason))
             self.emit(Event("playback_stopped", response_id, reason))
             task = self._responses.get(response_id)
             if task is not None and not task.done():

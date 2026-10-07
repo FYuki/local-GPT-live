@@ -5,7 +5,7 @@
 | Core | 人格付きLLM API。音声判断を持たない外部依存 |
 | VoiceSession | 本repoの音声会話制御。Core APIのcaller |
 | input generation / InputGrant | Backendが採番する入力認可。track/revisionと対応 |
-| response | 1つの生成・配信単位。生成完了後も再生ACKまでは有効 |
+| response | 1つの生成・配信単位。LiveKit接続時は送出台帳による推定終了、基底Sessionでは実再生ACKの完了条件で出力中の状態を閉じる |
 | playback | 端末が実際に消費する音声。配信量を実再生量とみなさない |
 | backchannel / take_turn | 相槌継続 / 発話権取得。PoCの判定を維持 |
 

@@ -48,7 +48,7 @@ class AudioInput:
     def _started(self, boundary: SpeechBoundary) -> None:
         self._capture = bytearray(self._preroll)
         self._generation = self.session.generation
-        self._overlap = self.session.active
+        self._overlap = self.session.current_output_response()
         self._preview_signal = SttSignalSpan()
         self._preview_attempts = self._preview_last_samples = 0
         self._preview_complete = False
