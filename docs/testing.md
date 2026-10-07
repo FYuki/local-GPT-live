@@ -42,7 +42,7 @@ provider integrationはHTTP mockとローカルloopback fixtureで契約と切�
 
 ```sh
 uv sync --frozen --extra livekit
-uv run --no-sync pytest -q tests/test_sent_audio.py tests/test_livekit_transport.py tests/test_session.py tests/test_input.py
+uv run --no-sync pytest -q tests/test_sent_audio.py tests/test_livekit_transport.py tests/test_estimated_output.py tests/test_session.py tests/test_input.py
 ```
 
 偽SDK、合成PCM、制御した単調時計を使い、書込み成功前、部分送出、連続ブロックprefix、
