@@ -26,6 +26,15 @@ provider integrationはHTTP mockとローカルloopback fixtureで契約と切�
 共有推論endpointがUbuntu-dogfoodにあっても、devの実行主体を置き換えない。
 合成入力による部分的な実接続結果は[Ubuntu検証証跡](evidence/2026-10-04-ubuntu-connections.md)を参照する。
 
+## RTP対応のオフライン観測
+
+`uv sync --frozen --extra livekit`で固定SDKを準備し、
+`uv run --no-sync python tools/rtp_observation.py`で接続しない合成ハーネスを実行する。
+`tests/test_rtp_observation.py`は通常のpytest対象に含まれる。
+実SDKのframe・統計schemaと合成値を分け、同数の補完、取消後遅着、rateの相違でも
+元PCM区間やブラウザ出力を確認済みにしない。実際の取消・codec・RTP配送はこのハーネスでは実行しない。
+次段階の観測点と不足は[RTP測定計画](rtp-observation-plan.md)を参照する。
+
 ## 実音声受入（別枠）
 
 1. 親作業者とGPU利用時間・Core版・共有STT/TTS endpointを固定する。サービス再設定はしない。
