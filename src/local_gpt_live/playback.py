@@ -49,6 +49,14 @@ class Playback:
         self._next_sequence += 1
         return True
 
+    def generation_completed(self, response_id: str) -> None:
+        """出力adapterが生成終端を観測するためのhook。基底はACK待ちを維持する。"""
+
+    @property
+    def last_audio_sequence(self) -> int:
+        """現在responseへenqueueした最後の番号。音声なしでは-1。"""
+        return self._next_sequence - 1
+
     def consume(self) -> AudioPacket | None:
         """配信済みは実再生済みではない。端末は別途完了ACKを返す。"""
         if not self._packets:

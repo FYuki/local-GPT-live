@@ -15,7 +15,8 @@ LiveKit の認証、track の照合、ブラウザの実再生観測を独立し
 は SDK の受信 queue に入る前の sample 位置を保持し、ローカル queue の欠落を検出する。
 この所有関係と sample 時計の考え方を小さな接続層へ移す。
 
-PoC の送出完了と固定遅延からの再生推定は採用しない。
+送出台帳・経過時間による出力中判定は、後続の[ADR 0005](0005-sent-audio-progress.md)で追加した。
+実再生ACKを生成する経路としては扱わない。
 別作業の [再生 ACK 境界案](https://github.com/FYuki/local-GPT-live/blob/2459c9b/docs/adr/0002-playback-ack.md)
 も、SDK への送信や時間経過を実再生の根拠にしていない。
 
@@ -62,7 +63,9 @@ PoC の送出完了と固定遅延からの再生推定は採用しない。
   sample 範囲は当該 response track 内の 0 始まりで、開始を含み末尾を含まない論理 PCM 範囲とする。
   再生 ACK、永続履歴、ネットワーク wire の定義として扱わない。
 - SDK の `capture_frame` 完了、queue が空、生成完了から ACK を合成しない。
-  アダプターは `playback_completed` を呼ばない。ACK 待ちの response は取消可能なまま保持する。
+  アダプターは `playback_completed` を呼ばない。
+  [ADR 0005](0005-sent-audio-progress.md)の生成・全送出・経過時間の条件を満たすと、
+  別入口の `estimated_output_completed` で出力中のresponseを終了する。
 - 停止時は出力認可を先に失効させ、source queue の消去と track の mute を行う。
   実行中の SDK 接続・公開・送信 task は所有を維持し、完了応答を受け取る前に取り消さない。
   遅れて返る native handle / publication SID を回収し、旧 response の出力を再開せず queue を再度消す。
@@ -79,7 +82,9 @@ PoC の送出完了と固定遅延からの再生推定は採用しない。
 
 後続統合では参加者認証と session の対応、受信統計検査の実通信受入、5 秒以内の入力 ACK、
 mute/focus/text/reconnect の device gate、echoCancellation/noiseSuppression、
-出力 track の購読・再生準備完了通知をホスト API へ運ぶ経路、response に帰属する出力時計と実再生 ACK を揃える。
+出力 track の購読・再生準備完了通知をホスト API へ運ぶ経路を揃える。
+responseに帰属する出力時計と実再生ACKは、推定との比較に使える別の観測経路であり、
+推定による出力終端の必須条件にしない。
 RTC track の publish 成功だけでは端末の再生準備を保証しない。ホスト API の準備確認を publish 成功から合成しない。
 ブラウザ ACK 純粋モジュールとそのテストは別担当の変更として維持する。
 

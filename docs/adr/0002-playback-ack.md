@@ -14,6 +14,10 @@
 も生成・配信量で端末の再生事実を補完しない。
 送出時刻からの推定を持つPoC内部adapterを、そのまま実再生証拠として移植しない。
 
+LiveKit adapterの出力中判定には、後続の[ADR 0005](0005-sent-audio-progress.md)で
+送出台帳と経過時間による別入口を追加した。下記の実再生ACKの検証・意味は維持し、
+推定からACKを合成しない。推定終了後の旧responseへのACKは失効する。
+
 ## 今回の契約
 
 - `AudioPacket.sequence`はresponseごとの0始まり。変更しない。

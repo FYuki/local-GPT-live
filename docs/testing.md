@@ -35,6 +35,25 @@ provider integrationはHTTP mockとローカルloopback fixtureで契約と切�
 元PCM区間やブラウザ出力を確認済みにしない。実際の取消・codec・RTP配送はこのハーネスでは実行しない。
 次段階の観測点と不足は[RTP測定計画](rtp-observation-plan.md)を参照する。
 
+## 送出台帳と進捗推定の合成検証
+
+[送出済み音声ブロックと出力終了の推定](sent-audio-progress.md)は、SDK書込み成功の
+範囲・時刻、経過時間による推定、Sessionの出力中判定を検証する。実再生ACKの証明ではない。
+
+```sh
+uv sync --frozen --extra livekit
+uv run --no-sync pytest -q tests/test_sent_audio.py tests/test_livekit_transport.py tests/test_session.py tests/test_input.py
+```
+
+偽SDK、合成PCM、制御した単調時計を使い、書込み成功前、部分送出、連続ブロックprefix、
+frame音声時間による制限、供給空白、取消・割込み後の固定、遅着capture、旧応答の分離、
+保持上限を確認する。Session側は生成と送出の順序が逆転する場合、未登録の後続ブロック、
+空応答、timerと発話開始の同時評価、取消prefixの保持、入力generationの維持を検証する。
+取得だけでは状態が変わらず、推定による出力終了が実再生ACKや`playback_completed`を
+生成しないこと、終了後の旧ACKを拒否することも確認する。
+下り遅延300msは初期仮定であり、この合成試験で実測・較正された値ではない。
+新しいtoken、LiveKit実接続、ブラウザ起動、マイク権限、共有サービス変更は不要。
+
 ## 実音声受入（別枠）
 
 1. 親作業者とGPU利用時間・Core版・共有STT/TTS endpointを固定する。サービス再設定はしない。
