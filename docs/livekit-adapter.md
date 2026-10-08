@@ -1,7 +1,8 @@
 # LiveKit 接続アダプター
 
 既存の `AudioInput` / `VoiceSession` / `Playback` と公式 LiveKit RTC SDK を接続するための Python API。
-ホストが認可した既存参加者を対象とする。ブラウザの制御メッセージ、実再生 ACK、実マイク受入は未接続。
+ホストが認可した既存参加者を対象とする。[認証済みhost/RPC](livekit-host-rpc.md)で
+制御と既存ACK受付を接続する。実ブラウザ・実マイクの会話受入は未実施。
 設計の判断は [ADR 0003](adr/0003-livekit-adapter.md)、音声側の不変条件は
 [ADR 0001](adr/0001-voice-boundary.md) を参照する。
 
@@ -83,7 +84,12 @@ SDK の `reconnecting` / `disconnected`、対象 participant の切断、入力 
 ホストはこの情報を対象端末へ通知し、認証済み端末の購読と再生準備を確認してから
 `transport.confirm_output_ready(response_id, track_sid)` を呼ぶ。
 アダプターは response と track SID の一致を検証する。確認前は PCM を送信せず、既定 3 秒で期限切れとなる。
-data-channel wire はホストの責務として未定義のまま残す。track 公開の通知だけで準備確認を自動発行しない。
+[host/RPC契約](livekit-host-rpc.md)が具体的wireを定める。track公開から準備確認を自動発行しない。
+ready期限はpublish後の同じ単調時計で保存し、timer実行前でも期限後の確認を拒否する。
+
+RPC入力は`prepare_input`で統計・grantを準備し、保存したgrantのACK後に`start_input`する。
+直接Python入口の`open_input`はこの二つを続けて実行する。
+SDK終了処理待機もRPC側の同じ入力期限を消費する。新trackの統計用配送はgrant前に開始する。
 
 ## 音声形式と送信情報
 
@@ -130,9 +136,9 @@ uv run --no-sync python tools/check_docs.py
 切断中の frame、source / stream の close と track の unpublish を確認する。
 合成試験の成功は、実通信、音声品質、ブラウザの実出力を確認した証拠にしない。
 
-実接続には、ホストによる参加者認証、受信統計と PCM 欠落検査の実通信受入、5 秒以内の入力 ACK、
-mute/focus/text/reconnect の device gate、echoCancellation/noiseSuppression、
-出力 track の購読・再生準備完了をホスト API へ伝える経路が必要。
+host/RPCは参加者照合、5秒入力ACK、device gate、出力readyのSDK入口を提供する。
+実会話受入には、この入口へ接続するブラウザ、受信統計とPCM欠落検査の実通信確認、
+echoCancellation/noiseSuppression、出力trackの購読・再生準備の実機確認が必要。
 実再生ACKは推定と比較する別の観測経路とし、推定による出力終端の必須条件にはしない。
 これらを揃えた後、親作業者と既存 endpoint・利用時間・実マイク受入条件を確認する。
 Ubuntu-dogfood の共有サービスや GPU の設定を変更せず、既存承認のない実接続を合成試験に混ぜない。

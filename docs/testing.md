@@ -5,7 +5,7 @@
 Python 3.12、uv 0.8.22を使い、WSL Ubuntuで実行する。
 
 ```sh
-uv sync --frozen
+uv sync --frozen --extra livekit
 uv run --no-sync pytest -q
 uv run --no-sync ruff check .
 uv run --no-sync mypy
@@ -55,6 +55,26 @@ frame音声時間による制限、供給空白、取消・割込み後の固定
 新しいtoken、LiveKit実接続、ブラウザ起動、マイク権限、共有サービス変更は不要。
 
 ## 実音声受入（別枠）
+
+[host/RPC](livekit-host-rpc.md)のschema UTは`tests/test_host_rpc.py`、
+偽SDK登録handlerから実入力・Session・transportを通すIT1は`tests/test_livekit_host.py`。
+ACK前の処理0件、同一期限、同じhostでgate/取消/再認可、遅着統計/reset、旧timer、
+SID・binding変更後の未送信通知破棄を確認する。SDKはfake、providerは合成値。
+通知/RPC応答だけを使う端末doubleで、STT起動のready/cancel、gate解除・論理再接続・
+stream終了・ACK期限切れ後の再認可、失敗通知、旧接続・順序逆転した状態の拒否も確認する。
+実LiveKit・ブラウザ・実マイクを通すSTや性能測定として扱わない。
+既存browser IT2は次のコマンドで回帰確認する。
+
+```sh
+node --check browser/playback-ack.mjs
+node --check browser/playback-ack-bridge.mjs
+node --check browser/pcm-renderer.mjs
+node --check browser/pcm-renderer-worklet.mjs
+node --test browser/tests/playback-ack.test.mjs
+node --test browser/integration/playback-ack-bridge.test.mjs browser/integration/playback-ack-host.test.mjs
+```
+
+CI成功は親作業者が対象headの実行履歴で確認する。ローカル全体検証をCI結果へ読み替えない。
 
 1. 親作業者とGPU利用時間・Core版・共有STT/TTS endpointを固定する。サービス再設定はしない。
 2. 既存LiveKit adapterを統合し、実マイクで最低3往復、文中休止、語頭/語尾、相槌継続を確認する。

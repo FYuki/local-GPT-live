@@ -55,11 +55,13 @@ class Pipeline:
 
     def __init__(self):
         self.close_calls = 0
+        self.received = []
 
     def reset(self, next_sample=None, *, quarantine=False):
         pass
 
     def feed(self, pcm, *, start_sample):
+        self.received.append((pcm, start_sample))
         return ()
 
     def close(self):
@@ -1044,3 +1046,46 @@ async def test_estimated_output_does_not_turn_provider_failure_into_empty_succes
     assert rig.transport._completion_timer is None
     assert any(event.kind == "response_failed" for event in rig.events)
     assert not any(event.kind == "output_estimated_completed" for event in rig.events)
+
+
+@pytest.mark.parametrize("elapsed_ns,accepted", [(199_999_999, True), (200_000_001, False)])
+async def test_ready_deadline_is_checked_before_timeout_callback_runs(rig, elapsed_ns, accepted):
+    rig.auto_ready = False
+    await rig.transport.connect()
+    response_id = rig.session.submit_text("合成入力")
+    await eventually(lambda: len(rig.published) == 1)
+    sid = rig.published[0].track_sid
+    assert rig.sources[0].capture_calls == 0
+    # 注入時計だけを進め、イベントループのtimeout callbackより先に受信する。
+    rig.now_ns += elapsed_ns
+    assert rig.transport.confirm_output_ready(response_id, sid) is accepted
+    if accepted:
+        await eventually(lambda: len(rig.segments) == 1)
+        assert rig.sources[0].capture_calls > 0
+    else:
+        rig.transport.cancel()
+        await eventually(lambda: rig.sources[0].close_calls == 1)
+        assert rig.sources[0].capture_calls == 0
+        assert rig.segments == []
+
+
+async def test_ready_output_delivers_later_segments_after_initial_ready_deadline(rig):
+    gate = rig.gate()
+
+    class Core:
+        async def stream(self, text):
+            yield "一。"
+            await gate.wait()
+            yield "二。"
+
+    rig.session.core = Core()
+    await rig.transport.connect()
+    response_id = rig.session.submit_text("合成入力")
+    await eventually(lambda: len(rig.segments) == 1)
+    rig.now_ns += 1_000_000_000
+    sid = rig.published[0].track_sid
+    assert not rig.transport.confirm_output_ready(response_id, sid)
+    gate.release.set()
+    await eventually(lambda: len(rig.segments) == 2)
+    assert [segment.sequence for segment in rig.segments] == [0, 1]
+    assert rig.sources[0].capture_calls == 6
