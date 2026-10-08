@@ -87,27 +87,36 @@ export function createConversation({ transport, connection, onChange, now }) {
     } finally { clearTimeout(timer); }
   }
   async function operation(type, fields) {
+    let old = null, failed = false;
     if (!['mute', 'focus'].includes(type)) error = null;
-    const old = ['mute', 'focus'].includes(type) && !fields.enabled ? null : invalidateInput();
-    if (['text', 'cancel', 'reconnect'].includes(type)) {
-      suppressedResponse = current?.active_response_id;
-      terminal = type === 'cancel' ? '取消' : '待機';
-      releaseOutput();
+    try {
+      old = ['mute', 'focus'].includes(type) && !fields.enabled ? null : invalidateInput();
+      if (['text', 'cancel', 'reconnect'].includes(type)) {
+        suppressedResponse = current?.active_response_id;
+        terminal = type === 'cancel' ? '取消' : '待機';
+        releaseOutput();
+      }
+      return await invoke(base(type, fields), 5000);
+    } catch (cause) { failed = true; fail(cause); throw cause; }
+    finally {
+      try { if (old) await old.close(); }
+      catch (cause) {
+        // 主操作の拒否理由は後片付けの失敗で置き換えない。
+        if (!failed) { fail(cause); throw cause; }
+      }
+      changed();
     }
-    try { return await invoke(base(type, fields), 5000); }
-    catch (cause) { fail(cause); throw cause; }
-    finally { if (old) await old.close(); changed(); }
   }
   async function startMicrophone() {
-    if (microphone || inputPhase !== '停止') throw new Error('input_already_open');
-    requireState();
-    if (current.muted || current.focused) throw new Error('input_suppressed');
-    error = null;
-    const epoch = ++inputEpoch;
-    let mic = null;
+    let mic = null, epoch;
     const valid = () => epoch === inputEpoch && !disconnected;
-    inputPhase = '準備中'; changed();
     try {
+      if (microphone || inputPhase !== '停止') throw new Error('input_already_open');
+      requireState();
+      if (current.muted || current.focused) throw new Error('input_suppressed');
+      error = null;
+      epoch = ++inputEpoch;
+      inputPhase = '準備中'; changed();
       mic = await transport.microphone();
       if (!valid()) throw new Error('operation_invalidated');
       microphone = mic;
@@ -137,9 +146,13 @@ export function createConversation({ transport, connection, onChange, now }) {
       authorization = { ...grant };
       inputPhase = '正式入力中'; changed();
     } catch (cause) {
-      if (mic) { mic.suppress(); await mic.close(); }
       if (valid()) {
-        microphone = null; authorization = null; inputPhase = '停止'; fail(cause);
+        microphone = null; authorization = null; inputPhase = '停止';
+      }
+      if (epoch === undefined || valid()) fail(cause);
+      try { if (mic) { mic.suppress(); await mic.close(); } }
+      catch {
+        // 分類済みの主操作失敗を保持し、元の例外を呼び出し側へ返す。
       }
       throw cause;
     }

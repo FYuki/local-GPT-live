@@ -7,6 +7,14 @@ const origin = 'http://127.0.0.1:41738';
 const token = 'synthetic-demo-token';
 let browser;
 const sdkFixture = `
+globalThis.__order = [];
+const nativeResume = AudioContext.prototype.resume;
+AudioContext.prototype.resume = async function() {
+  __order.push('resume');
+  if (globalThis.__holdResume) await new Promise(resolve => { globalThis.__releaseResume = resolve; });
+  if (globalThis.__resumeError) throw new Error('synthetic-private-resume');
+  await nativeResume.call(this); __order.push('resumed');
+};
 export const RoomEvent = { DataReceived:'dataReceived', TrackSubscribed:'trackSubscribed',
   TrackUnsubscribed:'trackUnsubscribed', Disconnected:'disconnected', Reconnecting:'reconnecting',
   ParticipantDisconnected:'participantDisconnected', ParticipantConnected:'participantConnected' };
@@ -15,6 +23,7 @@ export class Room {
   constructor() {
     globalThis.__fixtureRoom = this;
     this.listeners = new Map(); this.calls = []; this.publications = 0;
+    this.tracks = []; this.unpublished = []; this.stops = [];
     this.stateSequence = 0; this.connects = 0; this.responses = 0;
     this.current = {session_id:'session-fixture',connection_id:'connection-fixture',
       control_binding:'control-initial',input_revision:0,input_active:false,muted:false,focused:false,
@@ -23,6 +32,14 @@ export class Room {
     this.localParticipant = {identity:'fixture-user',sid:'PA-fixture',
       performRpc: async options => {
         const message = JSON.parse(options.payload); this.calls.push(message);
+        __order.push('rpc:'+message.type+':'+message.enabled);
+        if (this.holdType && this.holdType === message.type && (this.holdEnabled === undefined || this.holdEnabled === message.enabled)) {
+          await new Promise(resolve => { this.releaseRpc = resolve; });
+          __order.push('released:'+message.type);
+        }
+        if (this.rpcError && this.rpcErrorType === message.type) {
+          throw Object.assign(new Error('synthetic-private-error'), {code:this.rpcError});
+        }
         if (options.method === 'local-gpt-live.state.v1') {
           if (globalThis.__stateTimeout) throw Object.assign(new Error('synthetic-private-error'), {code:1502});
           if (message.session_id !== this.current.session_id || message.connection_id !== this.current.connection_id) {
@@ -52,10 +69,13 @@ export class Room {
         }
         const result = {...this.current,state_sequence:++this.stateSequence,
           binding:this.current.control_binding,...extra,ok:true};
+        if (message.type === 'open_input' && this.remainingMs !== undefined) result.remaining_ms = this.remainingMs;
+        if (message.type === 'input_ack' && this.ackTime !== undefined) globalThis.__now = this.ackTime;
+        __order.push('response:'+message.type+':'+message.enabled);
         return JSON.stringify(result);
       },
-      publishTrack: async track => ({trackSid:'TR-mic-'+(++this.publications),track}),
-      unpublishTrack: async () => {},
+      publishTrack: async track => { this.tracks.push(track); return {trackSid:'TR-mic-'+(++this.publications),track}; },
+      unpublishTrack: async track => { this.unpublished.push(track); if (this.closeError) throw new Error('synthetic-private-cleanup'); },
     };
   }
   on(name, callback) { const handlers=this.listeners.get(name)||[];handlers.push(callback);
@@ -73,11 +93,13 @@ export class Room {
   async disconnect() { this.emit('disconnected'); }
 }
 export async function createLocalAudioTrack(options) {
+  __order.push('microphone');
   if (globalThis.__denyMicrophone) throw new DOMException('拒否','NotAllowedError');
+  if (globalThis.__microphoneError) throw new Error('synthetic-private-error');
   const context=new AudioContext();const destination=context.createMediaStreamDestination();
   const mediaStreamTrack=destination.stream.getAudioTracks()[0];
   return {mediaStreamTrack, async mute(){mediaStreamTrack.enabled=false;},
-    stop(){mediaStreamTrack.stop();void context.close();}};
+    stop(){__fixtureRoom.stops.push(mediaStreamTrack.id);mediaStreamTrack.stop();void context.close();}};
 }
 `;
 
@@ -121,6 +143,297 @@ async function connect(page) {
   }
   await page.getByRole('button', { name: '接続', exact: true }).click();
   await page.waitForFunction(() => __fixtureRoom?.connects === 1);
+}
+
+async function focusStart(page) {
+  await page.getByLabel('テキスト', { exact: true }).focus();
+  await page.waitForFunction(() => __fixtureRoom.current.focused);
+  await page.evaluate(() => {
+    __order.length = 0;
+    __fixtureRoom.holdType = 'focus'; __fixtureRoom.holdEnabled = false;
+    globalThis.__holdResume = true;
+  });
+  await page.getByRole('button', { name: 'マイク開始', exact: true }).click();
+  await page.waitForFunction(() => __fixtureRoom.releaseRpc && globalThis.__releaseResume);
+}
+
+for (const late of [false, true]) {
+  test(`focus解除応答がresumeの${late ? '後' : '前'}でも一度の開始からACKへ進む`, async t => {
+    const { page } = await fixture(t);
+    await connect(page);
+    await focusStart(page);
+    if (late) {
+      await page.evaluate(() => __releaseResume());
+      await page.waitForFunction(() => __order.includes('resumed'));
+    }
+    await page.evaluate(() => __fixtureRoom.releaseRpc());
+    await page.waitForFunction(() => !__fixtureRoom.current.focused);
+    if (!late) await page.evaluate(() => __releaseResume());
+    t.diagnostic(JSON.stringify(await page.evaluate(() => __order)));
+    await page.waitForFunction(() => document.getElementById('input-state').textContent === '正式入力中');
+    const order = await page.evaluate(() => __order);
+    assert.ok(order.indexOf('response:focus:false') < order.indexOf('microphone'));
+    assert.equal(await page.evaluate(() => __fixtureRoom.publications), 1);
+  });
+}
+
+async function finalAlert(page, pattern) {
+  await page.getByRole('alert').waitFor({ state: 'visible' });
+  // RPC帰還・後片付けから操作catchまでのmicrotaskを終えたDOMを読む。
+  await page.evaluate(() => new Promise(resolve => requestAnimationFrame(resolve)));
+  const message = await page.getByRole('alert').textContent();
+  assert.match(message, pattern);
+  assert.doesNotMatch(message, /synthetic-private/);
+}
+
+for (const [type, enabled, button] of [
+  ['mute', false, 'マイク開始'], ['mute', true, 'マイク停止'],
+  ['focus', true, null], ['focus', false, null], ['text', undefined, '送信'],
+  ['cancel', undefined, '取消'], ['reconnect', undefined, '再接続'],
+]) {
+  for (const reason of ['input_timeout', 'operation_failed']) {
+    test(`${type}:${enabled}の${reason}を操作終了後のalertへ保持する`, async t => {
+      const { page, logs } = await fixture(t);
+      await connect(page);
+      if (type === 'mute' && !enabled) {
+        await page.getByRole('button', { name: 'マイク停止', exact: true }).click();
+        await page.waitForFunction(() => __fixtureRoom.current.muted);
+      }
+      if (type === 'focus' && !enabled) {
+        await page.getByLabel('テキスト', { exact: true }).focus();
+        await page.waitForFunction(() => __fixtureRoom.current.focused);
+      }
+      await page.evaluate(({ type, reason }) => {
+        __fixtureRoom.rejectNext = reason; __fixtureRoom.rejectNextType = type;
+        document.getElementById('text').value = '合成入力';
+      }, { type, reason });
+      if (type === 'focus') {
+        if (enabled) await page.getByLabel('テキスト', { exact: true }).focus();
+        else await page.getByLabel('テキスト', { exact: true }).evaluate(node => node.blur());
+      } else await page.getByRole('button', { name: button, exact: true }).click();
+      await finalAlert(page, reason === 'input_timeout' ? /タイムアウト/ : /host.*拒否/);
+      assert.equal(await page.evaluate(() => __fixtureRoom.publications), 0);
+      assert.doesNotMatch(logs.join('\n'), /synthetic-private/);
+    });
+  }
+}
+
+for (const type of ['open_input', 'input_ack']) {
+  for (const reason of ['input_timeout', 'operation_failed']) {
+    test(`${type}の${reason}を回収完了後も表示する`, async t => {
+      const { page } = await fixture(t);
+      await connect(page);
+      await page.evaluate(({type, reason}) => {
+        __fixtureRoom.rejectNext = reason; __fixtureRoom.rejectNextType = type;
+      }, {type, reason});
+      await page.getByRole('button', { name: 'マイク開始', exact: true }).click();
+      await page.waitForFunction(() => __fixtureRoom.stops.length === 1);
+      await finalAlert(page, reason === 'input_timeout' ? /タイムアウト/ : /host.*拒否/);
+      assert.equal(await page.evaluate(() => __fixtureRoom.calls.filter(c => c.type === 'input_ack').length), type === 'input_ack' ? 1 : 0);
+      assert.equal(await page.evaluate(() => __fixtureRoom.tracks[0].mediaStreamTrack.readyState), 'ended');
+      assert.match(await page.locator('#input-state').textContent(), /停止/);
+    });
+  }
+  test(`${type}の5秒待機期限を操作完了後も表示する`, async t => {
+    const { page } = await fixture(t);
+    await connect(page);
+    await page.clock.install();
+    await page.evaluate(type => { __fixtureRoom.holdType = type; }, type);
+    await page.getByRole('button', { name: 'マイク開始', exact: true }).click();
+    await page.waitForFunction(() => __fixtureRoom.releaseRpc);
+    await page.clock.runFor(5000);
+    await page.waitForFunction(() => __fixtureRoom.stops.length === 1);
+    // fake clock下のrequestAnimationFrameも進める。
+    await page.clock.resume();
+    await finalAlert(page, /タイムアウト/);
+    assert.match(await page.locator('#input-state').textContent(), /停止/);
+    assert.equal(await page.evaluate(() => __fixtureRoom.calls.filter(c => c.type === 'input_ack').length), type === 'input_ack' ? 1 : 0);
+    await page.evaluate(() => __fixtureRoom.releaseRpc());
+  });
+}
+
+for (const [remaining, ackTime, active] of [[1, 0, true], [0, 0, false], [5000, 4999, true], [5000, 5000, false]]) {
+  test(`残予算${remaining}・ACK時刻${ackTime}の入力表示と期限分類`, async t => {
+    const { page } = await fixture(t);
+    await connect(page);
+    await page.evaluate(({remaining, ackTime}) => {
+      globalThis.__now = 0; performance.now = () => __now;
+      __fixtureRoom.remainingMs = remaining; __fixtureRoom.ackTime = ackTime;
+    }, {remaining, ackTime});
+    await page.getByRole('button', { name: 'マイク開始', exact: true }).click();
+    if (active) await page.waitForFunction(() => document.getElementById('input-state').textContent === '正式入力中');
+    else {
+      await page.waitForFunction(() => __fixtureRoom.stops.length === 1);
+      await finalAlert(page, /タイムアウト/);
+    }
+    assert.equal(await page.evaluate(() => __fixtureRoom.calls.filter(c => c.type === 'input_ack').length), remaining === 0 ? 0 : 1);
+  });
+}
+
+for (const code of [1502, 1503]) {
+  test(`通常制御RPCのSDK code${code}を同期timeoutと区別する`, async t => {
+    const { page, logs } = await fixture(t);
+    await connect(page);
+    await page.evaluate(code => { __fixtureRoom.rpcError = code; __fixtureRoom.rpcErrorType = 'text'; }, code);
+    await page.getByRole('button', { name: '送信', exact: true }).click();
+    await finalAlert(page, code === 1502 ? /タイムアウト/ : /失敗/);
+    assert.doesNotMatch(await page.getByRole('alert').textContent(), /host同期/);
+    assert.doesNotMatch(logs.join('\n'), /synthetic-private/);
+  });
+}
+
+test('未知のマイク取得例外の本文を表示・ログへ出さない', async t => {
+  const { page, logs } = await fixture(t);
+  await connect(page);
+  await page.evaluate(() => { globalThis.__microphoneError = true; });
+  await page.getByRole('button', { name: 'マイク開始', exact: true }).click();
+  await finalAlert(page, /失敗/);
+  assert.doesNotMatch(logs.join('\n'), /synthetic-private/);
+});
+
+test('未知のhost拒否reasonの本文を表示・ログへ出さない', async t => {
+  const { page, logs } = await fixture(t);
+  await connect(page);
+  await page.evaluate(() => {
+    __fixtureRoom.rejectNext = 'synthetic-private-reason'; __fixtureRoom.rejectNextType = 'text';
+  });
+  await page.getByRole('button', { name: '送信', exact: true }).click();
+  await finalAlert(page, /host.*拒否/);
+  assert.doesNotMatch(logs.join('\n'), /synthetic-private/);
+});
+
+test('過去の権限拒否を端末resume失敗や開始の事前拒否へ流用しない', async t => {
+  const { page } = await fixture(t);
+  await connect(page);
+  await page.evaluate(() => { globalThis.__denyMicrophone = true; });
+  await page.getByRole('button', { name: 'マイク開始', exact: true }).click();
+  await finalAlert(page, /権限/);
+  await page.evaluate(() => { globalThis.__resumeError = true; });
+  await page.getByRole('button', { name: 'マイク開始', exact: true }).click();
+  await finalAlert(page, /失敗/);
+  assert.doesNotMatch(await page.getByRole('alert').textContent(), /拒否/);
+  await page.evaluate(() => { globalThis.__resumeError = false; globalThis.__denyMicrophone = false; });
+  await page.getByRole('button', { name: 'マイク開始', exact: true }).click();
+  await page.waitForFunction(() => document.getElementById('input-state').textContent === '正式入力中');
+  await page.getByRole('button', { name: 'マイク開始', exact: true }).click();
+  await finalAlert(page, /失敗/);
+  assert.equal(await page.evaluate(() => __fixtureRoom.publications), 1);
+});
+
+for (const reason of [null, 'input_timeout', 'operation_failed']) {
+  test(`停止の後片付け失敗で主操作${reason}の分類を上書きしない`, async t => {
+    const { page } = await fixture(t);
+    await connect(page);
+    await page.getByRole('button', { name: 'マイク開始', exact: true }).click();
+    await page.waitForFunction(() => document.getElementById('input-state').textContent === '正式入力中');
+    await page.evaluate(reason => {
+      __fixtureRoom.closeError = true; __fixtureRoom.rejectNext = reason; __fixtureRoom.rejectNextType = 'mute';
+    }, reason);
+    await page.getByRole('button', { name: 'マイク停止', exact: true }).click();
+    await page.waitForFunction(() => __fixtureRoom.stops.length === 1);
+    await finalAlert(page, reason === 'input_timeout' ? /タイムアウト/ : reason ? /host.*拒否/ : /失敗/);
+    assert.match(await page.locator('#input-state').textContent(), /停止/);
+  });
+}
+
+test('open拒否の回収失敗でも主操作のtimeoutを表示する', async t => {
+  const { page } = await fixture(t);
+  await connect(page);
+  await page.evaluate(() => {
+    __fixtureRoom.closeError = true; __fixtureRoom.rejectNext = 'input_timeout'; __fixtureRoom.rejectNextType = 'open_input';
+  });
+  await page.getByRole('button', { name: 'マイク開始', exact: true }).click();
+  await page.waitForFunction(() => __fixtureRoom.stops.length === 1);
+  await finalAlert(page, /タイムアウト/);
+});
+
+for (const failure of ['operation_failed', 'input_timeout', 'sdk-timeout']) {
+  test(`開始待機中のfocus解除${failure}では新trackを取得しない`, async t => {
+    const { page } = await fixture(t);
+    await connect(page);
+    await focusStart(page);
+    await page.evaluate(failure => {
+      const room = __fixtureRoom;
+      if (failure === 'sdk-timeout') { room.rpcError = 1502; room.rpcErrorType = 'focus'; }
+      else { room.rejectNext = failure; room.rejectNextType = 'focus'; }
+      __releaseResume(); room.releaseRpc();
+    }, failure);
+    await finalAlert(page, failure === 'operation_failed' ? /host.*拒否/ : /タイムアウト/);
+    assert.equal(await page.evaluate(() => __fixtureRoom.publications), 0);
+    assert.equal(await page.evaluate(() => __fixtureRoom.calls.filter(c => ['open_input','input_ack'].includes(c.type)).length), 0);
+    await page.evaluate(() => {
+      __fixtureRoom.holdType = null; __fixtureRoom.rpcError = null; globalThis.__holdResume = false;
+    });
+    await page.getByLabel('テキスト', { exact: true }).focus();
+    await page.getByRole('button', { name: 'マイク開始', exact: true }).click();
+    await page.waitForFunction(() => document.getElementById('input-state').textContent === '正式入力中');
+  });
+}
+
+for (const interruption of ['マイク停止', '送信', 'focus設定', '取消', '再接続', '切断', '接続交代']) {
+  test(`focus解除待機中の${interruption}で旧開始を失効する`, async t => {
+    const { page } = await fixture(t);
+    await connect(page);
+    await focusStart(page);
+    await page.evaluate(() => { globalThis.__oldRoom = __fixtureRoom; __releaseResume(); });
+    await page.waitForFunction(() => __order.includes('resumed'));
+    await page.evaluate(() => { globalThis.__holdResume = false; });
+    if (interruption === '接続交代') await connect(page);
+    else if (interruption === 'focus設定') await page.getByLabel('テキスト', { exact: true }).focus();
+    else await page.getByRole('button', { name: interruption, exact: true }).click();
+    if (['切断', '接続交代'].includes(interruption)) {
+      await page.waitForFunction(() => document.getElementById('input-state').textContent === '停止');
+    } else if (interruption === 'focus設定') await page.waitForFunction(() => __fixtureRoom.calls.filter(c => c.type === 'focus' && c.enabled).length === 2);
+    else await page.waitForFunction(type => __fixtureRoom.calls.some(c => c.type === type),
+      interruption === 'マイク停止' ? 'mute' : interruption === '送信' ? 'text' : interruption === '取消' ? 'cancel' : 'reconnect');
+    await page.evaluate(() => __oldRoom.releaseRpc());
+    await page.waitForFunction(() => __order.includes('released:focus'));
+    await page.evaluate(() => new Promise(resolve => requestAnimationFrame(resolve)));
+    assert.equal(await page.evaluate(() => __oldRoom.publications + (__oldRoom === __fixtureRoom ? 0 : __fixtureRoom.publications)), 0);
+    assert.doesNotMatch(await page.locator('#input-state').textContent(), /正式入力中/);
+  });
+}
+
+test('blur単独は旧trackを再開せず次の明示開始は新trackのACKを待つ', async t => {
+  const { page } = await fixture(t);
+  await connect(page);
+  await page.getByRole('button', { name: 'マイク開始', exact: true }).click();
+  await page.waitForFunction(() => document.getElementById('input-state').textContent === '正式入力中');
+  await page.getByLabel('テキスト', { exact: true }).focus();
+  await page.waitForFunction(() => __fixtureRoom.stops.length === 1);
+  await page.getByLabel('テキスト', { exact: true }).evaluate(node => node.blur());
+  await page.waitForFunction(() => !__fixtureRoom.current.focused);
+  assert.equal(await page.evaluate(() => __fixtureRoom.publications), 1);
+  assert.match(await page.locator('#input-state').textContent(), /停止/);
+  await page.evaluate(() => { __fixtureRoom.holdType = 'input_ack'; });
+  await page.getByRole('button', { name: 'マイク開始', exact: true }).click();
+  await page.waitForFunction(() => __fixtureRoom.releaseRpc);
+  assert.match(await page.locator('#input-state').textContent(), /認可待ち/);
+  const sids = await page.evaluate(() => __fixtureRoom.calls.filter(c => c.type === 'open_input').map(c => c.track_sid));
+  assert.notEqual(sids[0], sids[1]);
+  await page.evaluate(() => __fixtureRoom.releaseRpc());
+  await page.waitForFunction(() => document.getElementById('input-state').textContent === '正式入力中');
+});
+
+for (const [event, identity] of [['disconnected', null], ['reconnecting', null],
+  ['participantDisconnected', 'fixture-host'], ['participantDisconnected', 'other-participant']]) {
+  test(`正式入力中のSDK ${event}:${identity}を同じ画面で観測する`, async t => {
+    const { page } = await fixture(t);
+    await connect(page);
+    await page.getByRole('button', { name: 'マイク開始', exact: true }).click();
+    await page.waitForFunction(() => document.getElementById('input-state').textContent === '正式入力中');
+    assert.equal(await page.evaluate(() => __fixtureRoom.tracks[0].mediaStreamTrack.readyState), 'live');
+    for (const id of ['start','stop','send','cancel','reconnect']) assert.equal(await page.locator('#'+id).isDisabled(), false);
+    await page.evaluate(({event, identity}) => __fixtureRoom.emit(event, {identity}), {event, identity});
+    const stopped = identity !== 'other-participant';
+    if (stopped) await page.waitForFunction(() => __fixtureRoom.stops.length === 1 && document.getElementById('start').disabled);
+    else await page.evaluate(() => new Promise(resolve => requestAnimationFrame(resolve)));
+    assert.equal(await page.evaluate(() => __fixtureRoom.tracks[0].mediaStreamTrack.readyState), stopped ? 'ended' : 'live');
+    assert.equal(await page.evaluate(() => __fixtureRoom.tracks[0].mediaStreamTrack.enabled), !stopped);
+    assert.equal(await page.evaluate(() => __fixtureRoom.unpublished.length), stopped ? 1 : 0);
+    for (const id of ['start','stop','send','cancel','reconnect']) assert.equal(await page.locator('#'+id).isDisabled(), stopped);
+    assert.equal((await page.locator('#input-state').textContent()).includes('正式入力中'), !stopped);
+  });
 }
 
 test('日本語画面の明示操作から接続・マイク・text・取消・再接続へ到達する', { timeout: 15000 }, async t => {
@@ -199,7 +512,7 @@ test('初期状態取得のtimeoutを表示し同じRoomで明示再試行でき
   await page.evaluate(() => { globalThis.__stateTimeout = true; });
   await page.getByRole('button', { name: 'host同期', exact: true }).click();
   await page.getByRole('alert').waitFor({state:'visible'});
-  assert.match(await page.getByRole('alert').textContent(), /タイムアウト/);
+  assert.match(await page.getByRole('alert').textContent(), /host同期.*タイムアウト/);
   assert.equal(await page.getByRole('button', { name: '送信', exact: true }).isDisabled(), true);
   await page.evaluate(() => { globalThis.__stateTimeout = false; });
   await page.getByRole('button', { name: 'host同期', exact: true }).click();
@@ -241,7 +554,7 @@ test('host拒否を画面で明示しtextを自動再送しない', { timeout: 1
   });
   await page.getByRole('button', { name: '送信', exact: true }).click();
   await page.getByRole('alert').waitFor({ state: 'visible' });
-  assert.ok((await page.getByRole('alert').textContent()).trim());
+  assert.match(await page.getByRole('alert').textContent(), /host.*拒否/);
   assert.equal(await page.evaluate(() => __fixtureRoom.calls.filter(c => c.type === 'text').length), 1);
 });
 
@@ -251,7 +564,7 @@ test('マイク権限拒否を表示し同じ画面で明示再試行できる',
   await page.evaluate(() => { globalThis.__denyMicrophone = true; });
   await page.getByRole('button', { name: 'マイク開始', exact: true }).click();
   await page.getByRole('alert').waitFor({ state: 'visible' });
-  assert.ok((await page.getByRole('alert').textContent()).trim());
+  assert.match(await page.getByRole('alert').textContent(), /権限.*拒否/);
   assert.equal(await page.evaluate(() => __fixtureRoom.calls.filter(c => c.type === 'input_ack').length), 0);
   await page.evaluate(() => { globalThis.__denyMicrophone = false; });
   await page.getByRole('button', { name: 'マイク開始', exact: true }).click();

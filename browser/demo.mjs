@@ -5,6 +5,7 @@ const element = id => document.getElementById(id);
 let conversation = null, adapter = null, context = null, connecting = false, disconnecting = null;
 let pendingNotifications = [], pendingTracks = [];
 let synchronizing = null;
+let focusRelease = null, startEpoch = 0;
 function settings() {
   return {
     hostIdentity: element('host-identity').value, hostSid: element('host-sid').value,
@@ -51,6 +52,7 @@ function render(view) {
 }
 function disconnect() {
   if (disconnecting) return disconnecting;
+  startEpoch++; focusRelease = null;
   disconnecting = (async () => {
     try {
       if (conversation) await conversation.disconnect();
@@ -110,24 +112,62 @@ async function connect() {
   } finally { connecting = false; }
 }
 function run(action) { void action().catch(showError); }
+async function runOperation(controller, action) {
+  try { await action(); return true; }
+  catch {
+    if (conversation === controller) render(controller.snapshot());
+    return false;
+  }
+}
+function control(action) {
+  startEpoch++;
+  const controller = conversation;
+  if (controller) void runOperation(controller, () => action(controller));
+}
 element('connect').addEventListener('click', () => run(connect));
 element('synchronize').addEventListener('click', () => run(synchronize));
 element('disconnect').addEventListener('click', () => run(disconnect));
 element('start').addEventListener('click', () => run(async () => {
-  await context.resume();
-  if (conversation.snapshot().muted) await conversation.setGate('mute', false);
-  await conversation.startMicrophone();
+  const controller = conversation, transport = adapter, audio = context;
+  const release = focusRelease;
+  const epoch = ++startEpoch;
+  const valid = () => conversation === controller && adapter === transport && context === audio &&
+    epoch === startEpoch && !disconnecting && controller?.snapshot().connected;
+  if (!valid()) return;
+  // 端末準備はクリックの有効期間に開始し、focus解除の帰還後も同じ接続を使う。
+  try { await audio.resume(); }
+  catch (cause) { if (valid()) showError(cause); return; }
+  if (!valid()) return;
+  if (release?.controller === controller && release.transport === transport) {
+    if (!await release.task || !valid()) return;
+  }
+  if (controller.snapshot().muted) {
+    if (!await runOperation(controller, () => controller.setGate('mute', false)) || !valid()) return;
+  }
+  await runOperation(controller, () => controller.startMicrophone());
 }));
-element('stop').addEventListener('click', () => run(() => conversation.setGate('mute', true)));
+element('stop').addEventListener('click', () => control(controller => controller.setGate('mute', true)));
 element('text').addEventListener('focus', () => {
-  if (conversation?.snapshot().connected) run(() => conversation.setGate('focus', true));
+  focusRelease = null;
+  if (conversation?.snapshot().connected) control(controller => controller.setGate('focus', true));
 });
 element('text').addEventListener('blur', () => {
-  if (conversation?.snapshot().connected) run(() => conversation.setGate('focus', false));
+  const controller = conversation, transport = adapter;
+  if (controller?.snapshot().connected) {
+    focusRelease = { controller, transport,
+      task: runOperation(controller, () => controller.setGate('focus', false)) };
+  }
 });
 element('send').addEventListener('click', () => run(async () => {
-  await context.resume();
-  await conversation.submitText(element('text').value);
+  startEpoch++;
+  const controller = conversation, transport = adapter, audio = context, text = element('text').value;
+  const valid = () => conversation === controller && adapter === transport && context === audio &&
+    !disconnecting && controller?.snapshot().connected;
+  if (!valid()) return;
+  try { await audio.resume(); }
+  catch (cause) { if (valid()) showError(cause); return; }
+  if (!valid()) return;
+  await runOperation(controller, () => controller.submitText(text));
 }));
-element('cancel').addEventListener('click', () => run(() => conversation.cancel()));
-element('reconnect').addEventListener('click', () => run(() => conversation.reconnect()));
+element('cancel').addEventListener('click', () => control(controller => controller.cancel()));
+element('reconnect').addEventListener('click', () => control(controller => controller.reconnect()));

@@ -58,7 +58,9 @@ uv run --no-sync browser-demo-host \
 - マイク停止: 端末送信を先に抑止し、host mute gateで失効後に旧trackを解放。
   再開はgate解除だけで行わず、マイク開始で新track・新認可を取得する。
 - テキスト欄のfocus: host focus gateで音声入力を失効する。
-  blurはgate解除だけ。送信本文は制御JSONとして解釈せずtextフィールドへ配送する。
+  blurはgate解除だけ。「マイク開始」を一度押すと、その接続の解除成功を待って新trackを取得する。
+  解除拒否・timeout・待機中の停止や切断では開始しない。解除だけでは旧trackを再開しない。
+  送信本文は制御JSONとして解釈せずtextフィールドへ配送する。
 - 取消・再接続: pending入力と出力を失効する。再接続ボタンは存続するRoomの論理reconnect。
   実RTC切断・reconnecting・host退室では単回hostを終了するため、
   新しいparticipant SIDとhost/Session/connection設定で起動手順をやり直す。
