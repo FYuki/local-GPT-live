@@ -135,6 +135,69 @@ async def until(predicate):
             await asyncio.sleep(0.001)
 
 
+@pytest.mark.parametrize("stopped", [False, True])
+@pytest.mark.parametrize("outcome", ["error", "end"])
+async def test_reader_failure_only_invalidates_its_current_operation(harness, monkeypatch, stopped,
+                                                                   outcome):
+    h = harness
+    entered, release = asyncio.Event(), asyncio.Event()
+
+    class FailingStream(Stream):
+        async def __anext__(self):
+            entered.set()
+            try:
+                await release.wait()
+            except asyncio.CancelledError:
+                await release.wait()
+            if outcome == "end":
+                raise StopAsyncIteration
+            raise RuntimeError("synthetic-native-secret-reader")
+
+    monkeypatch.setattr(module.rtc, "AudioStream", FailingStream)
+    grant, stream = await opened(h)
+    await entered.wait()
+    if stopped:
+        h.bridge.stop(reason="muted")
+    before_revision = h.audio.backend.revision
+    before_events = len(h.events)
+    release.set()
+    await until(lambda: stream.closed == 1)
+    if stopped:
+        assert h.audio.backend.revision == before_revision
+        assert len(h.events) == before_events
+    else:
+        assert h.audio.backend.grant is None
+        assert h.audio.backend.revision > before_revision
+        expected = ["input_invalidated"]
+        if outcome == "error":
+            expected.append("input_rejected")
+        assert [e.kind for e in h.events[before_events:]] == expected
+        if outcome == "error":
+            assert h.events[-1].detail == "microphone_read_failed"
+    assert h.audio.backend.grant is not grant
+
+
+async def test_direct_input_internal_backend_loss_is_notified(harness, monkeypatch):
+    h = harness
+
+    def failing_feed(pcm, *, start_sample):
+        raise RuntimeError("synthetic-native-secret-pcm")
+
+    def failing_reset(next_sample=None, *, quarantine=False):
+        if quarantine:
+            raise RuntimeError("synthetic-native-secret-reset")
+
+    monkeypatch.setattr(h.pipeline, "feed", failing_feed)
+    monkeypatch.setattr(h.pipeline, "reset", failing_reset)
+    _, stream = await opened(h)
+    for _ in range(10):
+        stream.push()
+    await until(lambda: stream.closed == 1)
+    assert h.audio.backend.grant is None
+    assert [e.kind for e in h.events][-2:] == ["input_invalidated", "input_rejected"]
+    assert h.events[-1].detail == "vad_unavailable"
+
+
 async def test_verified_batch_reaches_real_backend_with_sdk_sample_positions(harness):
     h = harness
     grant, stream = await opened(h)
@@ -453,3 +516,47 @@ async def test_repeated_open_waits_for_previous_stream_cleanup(harness, monkeypa
     assert h.audio.backend.grant is grant
     assert old_stream.closed == 1
     assert len(Stream.instances) == 2
+
+
+async def test_prepared_input_waits_for_ack_before_reading_pcm(harness):
+    h = harness
+    grant = await h.bridge.prepare(track_sid=h.track.sid, request_id="request", revision=1)
+    assert h.track.calls > 0
+    assert h.pipeline.received == []
+    assert Stream.instances == []
+    assert h.bridge.start(grant)
+    stream = Stream.instances[-1]
+    for _ in range(10):
+        stream.push()
+    await until(lambda: len(h.pipeline.received) == 10)
+    assert [start for _, start in h.pipeline.received] == list(range(0, 1600, 160))
+
+
+async def test_stopped_preparation_cannot_start_or_replace_new_input(harness):
+    h = harness
+    old = await h.bridge.prepare(track_sid=h.track.sid, request_id="old", revision=1)
+    h.bridge.stop(reason="disconnected")
+    assert not h.bridge.start(old)
+    assert h.audio.backend.grant is None
+    assert Stream.instances == []
+    new_track = Track()
+    new_track.sid = "replacement"
+    publication = SimpleNamespace(**vars(h.publication))
+    publication.sid, publication.track = new_track.sid, new_track
+    h.participant.track_publications[new_track.sid] = publication
+    new = await h.bridge.prepare(track_sid=new_track.sid, request_id="new", revision=3)
+    assert not h.bridge.start(old)
+    assert h.bridge.start(new)
+    for _ in range(10):
+        Stream.instances[-1].push()
+    await until(lambda: len(h.pipeline.received) == 10)
+    assert h.audio.backend.grant == new
+
+
+async def test_start_rechecks_participant_after_preparation(harness):
+    h = harness
+    grant = await h.bridge.prepare(track_sid=h.track.sid, request_id="request", revision=1)
+    h.participant.sid = "rejoined"
+    assert not h.bridge.start(grant)
+    assert h.audio.backend.grant is None
+    assert Stream.instances == []

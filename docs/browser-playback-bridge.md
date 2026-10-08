@@ -3,7 +3,8 @@
 この統合は、[純粋ACKコントローラー](../browser/README.md)と
 [PR2の再生履歴契約](adr/0002-playback-ack.md)を接続します。
 識別済みPCMをAudioWorkletへ渡す経路が対象です。LiveKitのRTP音声をこのPCMへ
-変換する機能、認証済みRPCのネットワークendpoint、画面UIは含みません。
+変換する機能と画面UIは含みません。認証済みRPCのSDK入口は
+[host/RPC](livekit-host-rpc.md)に接続しました。
 [提案ADR](adr/0004-browser-playback-bridge.md)にこの境界を記録しています。
 
 ## 再生証拠
@@ -130,7 +131,8 @@ unknown field、重複JSON key、bool/floatの整数偽装、NaN、古いbinding
 callbackが来る構成では、callbackのbindingがhostの現行bindingに一致するときだけ失効させます。
 旧scopeのcallbackで新bindingを無条件に失効させないでください。
 ブラウザ側取消だけでは既送出RPCの副作用を取り消せません。ネットワークhostは取消通知、
-server側binding失効、新binding発行の順序を実装する必要があります。このendpointは未実装です。
+server側binding失効、新binding発行の順序を実装する必要があります。
+[host/RPC](livekit-host-rpc.md)がこのSDK入口を実装します。
 
 ## 有界性と回復
 

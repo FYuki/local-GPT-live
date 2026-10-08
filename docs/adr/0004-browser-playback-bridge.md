@@ -1,6 +1,7 @@
 # ADR 0004: 識別済みPCMのブラウザ描画と個別ACKの受信境界
 
-状態: 提案（ネットワークhostとLiveKit RTP対応付けは未実装）
+状態: 提案（ネットワークhostは[ADR 0006](0006-livekit-host-rpc.md)で接続。
+LiveKit RTP対応付けは未実装）
 
 ## 背景
 
@@ -23,7 +24,8 @@ ACKはbackend受理で確定し、完了通知は生成完了かつ全区間ACK�
 ## 制約と後続
 
 既存core、LiveKit SDK、純粋controllerの契約を変更しません。sample rate変換、RTPの元PCM区間対応、
-認証済みRPC endpointは追加契約が必要です。対応根拠がないRTP受信量からACKを生成しません。
+認証済みRPC endpointの契約は[ADR 0006](0006-livekit-host-rpc.md)で追加しました。
+対応根拠がないRTP受信量からACKを生成しません。
 既存RTP受信音声を鳴らしながら本rendererでも同音声を鳴らす二重出力は禁止します。
 
 headlessの合成検証はsoftware renderの証拠です。音声装置の可聴受入やLiveKit経由ACKの本番受入とは

@@ -153,6 +153,7 @@ class LiveKitInput:
         self._opening = asyncio.Lock()
         self._epoch = 0
         self._closed = False
+        self._prepared: tuple[InputGrant, rtc.RemoteTrack, _Counters] | None = None
 
     def _track(self, track_sid: str) -> rtc.RemoteTrack:
         participant = self.room.remote_participants.get(self.identity)
@@ -190,11 +191,17 @@ class LiveKitInput:
         task.add_done_callback(finished)
 
     async def open(self, *, track_sid: str, request_id: str, revision: int) -> InputGrant:
+        grant = await self.prepare(track_sid=track_sid, request_id=request_id, revision=revision)
+        if not self.start(grant):
+            raise AudioInputFault("microphone_stream_unavailable")
+        return grant
+
+    async def prepare(self, *, track_sid: str, request_id: str, revision: int) -> InputGrant:
         task = asyncio.current_task()
         assert task is not None
         self._opens.add(task)
         try:
-            return await self._open(track_sid=track_sid, request_id=request_id, revision=revision)
+            return await self._prepare(track_sid=track_sid, request_id=request_id, revision=revision)
         finally:
             self._opens.discard(task)
 
@@ -206,7 +213,18 @@ class LiveKitInput:
                     and (self._reader.done() or self._reader.cancelling()))
         )
 
-    async def _open(self, *, track_sid: str, request_id: str, revision: int) -> InputGrant:
+    async def wait_for_cleanup(self) -> None:
+        while self._cleanup_pending():
+            owned = tuple(task for task in self._tasks | self._observations
+                          if not task.done()
+                          and (task is not self._reader or task.cancelling()))
+            if owned:
+                await asyncio.wait(owned)
+            else:
+                # 終了readerのretire callbackが新たなrelease taskを所有する。
+                await asyncio.sleep(0)
+
+    async def _prepare(self, *, track_sid: str, request_id: str, revision: int) -> InputGrant:
         async with self._opening:
             if self._closed:
                 raise AudioInputFault("audio_input_closed")
@@ -216,7 +234,9 @@ class LiveKitInput:
                 raise AudioInputFault("invalid_input_request")
             track = self._track(track_sid)
             old = self.audio.backend.grant
-            if (old is not None and self._reader is not None and not self._reader.done()
+            if (old is not None
+                    and (self._prepared is not None
+                         or self._reader is not None and not self._reader.done())
                     and (track_sid, request_id, revision)
                     == (old.track_sid, old.request_id, old.input_revision)):
                 return old
@@ -232,25 +252,43 @@ class LiveKitInput:
                 raise AudioInputFault("microphone_cleanup_pending")
             grant = await self.audio.open(track_sid=track_sid, request_id=request_id,
                                           revision=revision)
-            clock = _FrameClock()
             try:
                 if self._closed or epoch != self._epoch or self._track(track_sid) is not track:
                     raise AudioInputFault("stale_input_request")
-                if self._reader is not None:
-                    self._reader.cancel()
-                stream = rtc.AudioStream(track, sample_rate=16_000, num_channels=1,
-                                         capacity=160, frame_size_ms=10, noise_cancellation=clock)
-            except Exception as error:
+            except Exception:
                 if self.audio.backend.grant is grant:
                     self.stop(reason="input_open_failed")
-                if isinstance(error, AudioInputFault):
-                    raise
-                raise AudioInputFault("microphone_stream_unavailable") from None
-            self._reader = asyncio.create_task(self._read(stream, clock, track, counters, grant))
-            self._streams[stream] = clock
-            self._reader.add_done_callback(lambda _: self._retire(stream))
-            self._remember(self._reader)
+                raise
+            self._prepared = (grant, track, counters)
             return grant
+
+    def start(self, grant: InputGrant) -> bool:
+        if self._closed or self.audio.backend.grant is not grant:
+            return False
+        if self._prepared is None:
+            return self._reader is not None and not self._reader.done()
+        saved, track, counters = self._prepared
+        if saved is not grant:
+            return False
+        clock = _FrameClock()
+        try:
+            if self._track(grant.track_sid) is not track:
+                raise AudioInputFault("stale_input_request")
+            stream = rtc.AudioStream(track, sample_rate=16_000, num_channels=1,
+                                     capacity=160, frame_size_ms=10, noise_cancellation=clock)
+        except Exception:
+            self.stop(reason="input_open_failed")
+            return False
+        self._prepared = None
+        if self._reader is not None:
+            self._reader.cancel()
+        self._reader = asyncio.create_task(
+            self._read(stream, clock, track, counters, grant, self._epoch),
+        )
+        self._streams[stream] = clock
+        self._reader.add_done_callback(lambda _: self._retire(stream))
+        self._remember(self._reader)
+        return True
 
     def stop(self, *, revision: int | None = None, reason: str = "input_stopped") -> bool:
         changed = self.audio.suppress(
@@ -258,12 +296,15 @@ class LiveKitInput:
             reason=reason,
         )
         if changed or revision is None:
+            self._prepared = None
             self._epoch += 1
             if self._reader is not None and self._reader is not asyncio.current_task():
                 self._reader.cancel()
             for task in tuple(self._opens):
                 if task is not asyncio.current_task():
                     task.cancel()
+        if changed:
+            self.audio.session.emit(Event("input_invalidated"))
         return changed
 
     def _retire(self, stream: rtc.AudioStream) -> None:
@@ -285,7 +326,7 @@ class LiveKitInput:
             self.audio.session.emit(Event("shutdown_pending", detail="microphone_stream_not_drained"))
 
     async def _read(self, stream: rtc.AudioStream, clock: _FrameClock, track: rtc.RemoteTrack,
-                    counters: _Counters, grant: InputGrant) -> None:
+                    counters: _Counters, grant: InputGrant, epoch: int) -> None:
         position = 0
         batch: list[tuple[bytes, int]] = []
         try:
@@ -311,7 +352,11 @@ class LiveKitInput:
         except asyncio.CancelledError:
             raise
         except Exception as error:
-            if self.audio.backend.grant is grant:
+            # Backendがこの操作のgrantを内部失効しても、現行readerの失敗は通知する。
+            # 停止・交代後の遅着は現在の操作へ作用させない。
+            if (not self._closed and self._epoch == epoch
+                    and self._reader is asyncio.current_task()
+                    and (self.audio.backend.grant is grant or self.audio.backend.grant is None)):
                 reason = error.code if isinstance(error, AudioInputFault) else "microphone_read_failed"
                 self.stop(reason=reason)
                 self.audio.session.emit(Event("input_rejected", detail=reason))

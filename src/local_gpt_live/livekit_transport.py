@@ -105,6 +105,7 @@ class _Output:
     progress: SentAudioProgress | None = None
     scope: SentAudioScope | None = None
     sid: str | None = None
+    ready_deadline_ns: int | None = None
     samples: int = 0
     ready: asyncio.Event = field(default_factory=asyncio.Event)
 
@@ -148,9 +149,36 @@ class LiveKitTransport:
         self._disconnect_lock = asyncio.Lock()
         self._handlers: list[tuple[EventTypes, Callable[..., None]]] = []
         self._completion_timer: asyncio.TimerHandle | None = None
+        self._host_attached = False
+        self._on_lost: Callable[[], None] = lambda: None
         audio.session.set_output_estimator(self.sent_audio_progress)
         playback._invalidate = self._invalidate
         playback._attached = True
+
+    def attach_host(self, *, on_track: Callable[[TrackPublished], None],
+                    on_segment: Callable[[SegmentSent], None],
+                    on_event: Callable[[Event], None], on_lost: Callable[[], None]) -> None:
+        if self._host_attached or self._started or self._closed:
+            raise ValueError("host_attach_before_connect")
+        self._host_attached = True
+        previous_track, previous_segment = self._on_track, self._on_segment
+        previous_event = self.audio.session.emit
+
+        def track(value: TrackPublished) -> None:
+            on_track(value)
+            previous_track(value)
+
+        def segment(value: SegmentSent) -> None:
+            on_segment(value)
+            previous_segment(value)
+
+        def event(value: Event) -> None:
+            on_event(value)
+            previous_event(value)
+
+        self._on_track, self._on_segment = track, segment
+        self.audio.session.emit = event
+        self._on_lost = on_lost
 
     def _report(self, reason: str) -> None:
         self.audio.session.emit(Event("transport_failed", detail=reason))
@@ -188,6 +216,7 @@ class LiveKitTransport:
             return
         self._closed = True
         self._connected = False
+        self._on_lost()
         self.input.stop(reason="transport_disconnected")
         self.audio.session.reconnect()
         self._closing = asyncio.create_task(self._shutdown())
@@ -249,7 +278,8 @@ class LiveKitTransport:
     def confirm_output_ready(self, response_id: str, track_sid: str) -> bool:
         output = self._output
         if (output is None or output.response_id != response_id or output.sid != track_sid
-                or not self._current(response_id)):
+                or not self._current(response_id) or output.ready_deadline_ns is None
+                or self._clock_ns() >= output.ready_deadline_ns):
             return False
         output.ready.set()
         return True
@@ -258,6 +288,17 @@ class LiveKitTransport:
         if not self._connected or self._closed:
             raise RuntimeError("livekit_not_connected")
         return await self.input.open(track_sid=track_sid, request_id=request_id, revision=revision)
+
+    async def prepare_input(self, *, track_sid: str, request_id: str, revision: int) -> InputGrant:
+        if not self._connected or self._closed:
+            raise RuntimeError("livekit_not_connected")
+        await self.input.wait_for_cleanup()
+        if not self._connected or self._closed:
+            raise RuntimeError("livekit_not_connected")
+        return await self.input.prepare(track_sid=track_sid, request_id=request_id, revision=revision)
+
+    def start_input(self, grant: InputGrant) -> bool:
+        return self._connected and not self._closed and self.input.start(grant)
 
     def _current(self, response_id: str) -> bool:
         return not self._closed and self.playback.active == response_id
@@ -380,6 +421,9 @@ class LiveKitTransport:
             output.progress = ledger
             self._previous_progress = self._progress
             self._progress = (packet.response_id, ledger)
+            output.ready_deadline_ns = (
+                self._clock_ns() + round(self.config.output_ready_timeout * 1e9)
+            )
             self._on_track(TrackPublished(packet.response_id, output.sid))
         if output.sample_rate != rate:
             raise ValueError("livekit_response_rate_changed")
@@ -391,8 +435,11 @@ class LiveKitTransport:
                                     sample_start=start, sample_end=start + frames):
             return
         try:
-            async with asyncio.timeout(self.config.output_ready_timeout):
-                await output.ready.wait()
+            assert output.ready_deadline_ns is not None
+            if not output.ready.is_set():
+                remaining = max(0, (output.ready_deadline_ns - self._clock_ns()) / 1e9)
+                async with asyncio.timeout(remaining):
+                    await output.ready.wait()
             for offset in range(0, len(pcm), (rate // 100) * 2):
                 if not self._current(packet.response_id):
                     return

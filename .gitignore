@@ -13,3 +13,4 @@ build/
 *.log
 .coverage
 htmlcov/
+.takt/
