@@ -1,0 +1,14 @@
+{
+  "name": "local-gpt-live-browser",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "start": "node dev-server.mjs",
+    "test": "node --test --test-timeout=10000 tests/*.test.mjs",
+    "test:integration": "node --test --test-timeout=15000 integration/conversation-host.test.mjs integration/dev-server.test.mjs integration/playback-ack-bridge.test.mjs integration/playback-ack-host.test.mjs",
+    "test:browser": "node --test --test-timeout=20000 integration/*.browser.test.mjs",
+    "build": "node --check demo.mjs && node --check conversation.mjs && node --check livekit-adapter.mjs && node --check dev-server.mjs"
+  },
+  "dependencies": { "livekit-client": "2.22.3" },
+  "devDependencies": { "playwright": "1.56.0" }
+}

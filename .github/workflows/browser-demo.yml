@@ -1,0 +1,30 @@
+name: 最小ブラウザデモの合成検証
+on:
+  pull_request:
+  push:
+    branches: [main, 'epic/**']
+permissions:
+  contents: read
+jobs:
+  demo:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: astral-sh/setup-uv@v6
+        with:
+          version: '0.8.22'
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - run: uv sync --frozen --extra livekit
+      - run: npm ci --prefix browser
+      - run: node browser/node_modules/playwright/cli.js install --with-deps chromium
+      - run: npm --prefix browser run build
+      - run: npm --prefix browser test
+      - run: npm --prefix browser run test:integration
+      - run: npm --prefix browser run test:browser
+      - run: uv run --no-sync pytest -q tests/test_browser_demo.py

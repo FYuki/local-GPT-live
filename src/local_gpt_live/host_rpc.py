@@ -122,6 +122,20 @@ def rejected_result(error: BaseException) -> dict[str, object]:
     return {"ok": False, "reason": reason}
 
 
+def parse_state_request(payload: str) -> tuple[str, str]:
+    try:
+        if not 0 < len(payload.encode("utf-8")) <= MAX_CONTROL_BYTES:
+            raise RpcRejected("invalid_control")
+        raw = json.loads(payload, object_pairs_hook=_object, parse_constant=_constant)
+        if (not isinstance(raw, dict) or set(raw) != {"v", "session_id", "connection_id"}
+                or type(raw["v"]) is not int or raw["v"] != 1
+                or not identifier(raw["session_id"]) or not identifier(raw["connection_id"])):
+            raise RpcRejected("invalid_control")
+        return raw["session_id"], raw["connection_id"]
+    except (ValueError, UnicodeError, RecursionError, TypeError):
+        raise RpcRejected("invalid_control") from None
+
+
 def estimate_fields(snapshot: SentAudioSnapshot) -> dict[str, object]:
     return {
         "response_id": snapshot.response_id, "generation": snapshot.generation,

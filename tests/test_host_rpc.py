@@ -11,6 +11,7 @@ from local_gpt_live.host_rpc import (
     estimate_fields,
     identifier,
     parse_control,
+    parse_state_request,
     rejected_result,
 )
 
@@ -23,6 +24,24 @@ def wire(kind="open_input", **fields):
 def test_control_parses_track_and_host_revision_expectation():
     command = parse_control(wire(track_sid="track", expected_revision=0))
     assert (command.kind, command.track_sid, command.expected_revision) == ("open_input", "track", 0)
+
+
+def test_state_request_has_explicit_session_and_connection_without_control_binding():
+    assert parse_state_request(json.dumps(dict(v=1, session_id="session", connection_id="connection"))) == (
+        "session", "connection",
+    )
+
+
+@pytest.mark.parametrize("payload", [
+    "[]", "null", '{"v":1,"v":1,"session_id":"s","connection_id":"c"}',
+    json.dumps(dict(v=True, session_id="s", connection_id="c")),
+    json.dumps(dict(v=1, session_id="s", connection_id="")),
+    json.dumps(dict(v=1, session_id="s", connection_id="c", binding="arbitrary")),
+    json.dumps(dict(v=1, session_id="s")), "x" * 8193,
+])
+def test_state_request_rejects_malformed_or_extra_fields(payload):
+    with pytest.raises(RpcRejected):
+        parse_state_request(payload)
 
 
 @pytest.mark.parametrize("payload", [
