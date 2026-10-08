@@ -19,6 +19,7 @@ from .host_rpc import (
     estimate_fields,
     identifier,
     parse_control,
+    parse_state_request,
     rejected_result,
 )
 from .livekit_transport import LiveKitTransport, SegmentSent, TrackPublished
@@ -28,6 +29,7 @@ from .voice_input.session import InputGrant
 
 CONTROL_METHOD = "local-gpt-live.control.v1"
 ACK_METHOD = "local-gpt-live.playback-ack.v1"
+STATE_METHOD = "local-gpt-live.state.v1"
 NOTIFICATION_TOPIC = "local-gpt-live.events.v1"
 INPUT_ACK_SECONDS = 5.0
 
@@ -93,7 +95,8 @@ class LiveKitHost:
             if not self._authorized():
                 raise RpcRejected("unauthorized")
             participant = self.transport.room.local_participant
-            for method, handler in ((CONTROL_METHOD, self._control), (ACK_METHOD, self._ack)):
+            for method, handler in ((CONTROL_METHOD, self._control), (ACK_METHOD, self._ack),
+                                    (STATE_METHOD, self._get_state)):
                 # SDKはFFI登録前にhandlerを保存するため、部分失敗も回収対象にする。
                 self._methods.append(method)
                 participant.register_rpc_method(method, handler)
@@ -124,6 +127,17 @@ class LiveKitHost:
         if owned_session:
             result.update(self._state())
             result["binding"] = self.binding
+        return json.dumps(result, allow_nan=False)
+
+    async def _get_state(self, data: rtc.RpcInvocationData) -> str:
+        try:
+            self._authenticate(data)
+            session_id, connection_id = parse_state_request(data.payload)
+            if session_id != self.session_id or connection_id != self.connection_id:
+                raise RpcRejected("stale_binding")
+            result = {"ok": True, "v": 1, "type": "host_state", **self._state()}
+        except (Exception, asyncio.CancelledError) as error:
+            result = rejected_result(error)
         return json.dumps(result, allow_nan=False)
 
     def _state(self) -> dict[str, object]:

@@ -130,6 +130,51 @@ class HostRig:
         return response_id, track.track_sid
 
 
+async def request_state(h, *, identity="fixture-user", **fields):
+    from local_gpt_live.livekit_host import STATE_METHOD
+    payload = {"v": 1, "session_id": h.host.session_id, "connection_id": h.host.connection_id, **fields}
+    data = rtc.RpcInvocationData(request_id="state-request", caller_identity=identity,
+                                 payload=json.dumps(payload), response_timeout=5)
+    return json.loads(await h.participant.handlers[STATE_METHOD](data))
+
+
+async def test_state_handshake_recovers_missing_initial_notification_without_mutating_grant(h):
+    await h.start()
+    await h.host._notifications.join()
+    initial = h.participant.notifications.pop()[0]
+    prepared, _ = await h.prepare()
+    binding, grant = h.host.binding, h.rig.audio.backend.grant
+    result = await request_state(h)
+    assert result["ok"] and result["type"] == "host_state"
+    assert result["connection_id"] == initial["connection_id"]
+    assert result["state_sequence"] > initial["state_sequence"]
+    assert result["control_binding"] == binding
+    assert result["input_revision"] == grant.input_revision
+    assert h.rig.audio.backend.grant is grant
+    assert Stream.instances == []
+    assert (await h.input_ack(prepared))["ok"]
+
+
+@pytest.mark.parametrize("fields,reason", [
+    ({"identity": "other-user"}, "unauthorized"),
+    ({"session_id": "old-session"}, "stale_binding"),
+    ({"connection_id": "old-connection"}, "stale_binding"),
+    ({"binding": "arbitrary"}, "invalid_control"),
+])
+async def test_state_handshake_rejects_wrong_caller_or_scope_without_disclosing_state(h, fields, reason):
+    await h.start()
+    revision, binding = h.rig.audio.backend.revision, h.host.binding
+    assert await request_state(h, **fields) == {"ok": False, "reason": reason}
+    assert h.rig.audio.backend.revision == revision
+    assert h.host.binding == binding
+
+
+async def test_state_handshake_rejects_same_identity_with_replaced_sid(h):
+    await h.start()
+    h.remote.sid = "PA-replaced"
+    assert await request_state(h) == {"ok": False, "reason": "unauthorized"}
+
+
 class WireClient:
     """認証済み接続の初期通知以降、RPC応答と通知だけから状態を更新する。"""
 

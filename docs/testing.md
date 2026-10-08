@@ -56,6 +56,10 @@ frame音声時間による制限、供給空白、取消・割込み後の固定
 
 ## 実音声受入（別枠）
 
+[最小ブラウザデモ](browser-demo.md)のnpm scriptsで新規UT/IT1/IT2と既存browser回帰を実行する。
+通常CIは `browser-demo.yml` に配線する。診断は共有推論を呼ばず入力到達量と合成音を確認する。
+fake SDK・合成マイクと実Chromiumの成功を実RTC・実マイク・聴感の受入へ読み替えない。
+
 [host/RPC](livekit-host-rpc.md)のschema UTは`tests/test_host_rpc.py`、
 偽SDK登録handlerから実入力・Session・transportを通すIT1は`tests/test_livekit_host.py`。
 ACK前の処理0件、同一期限、同じhostでgate/取消/再認可、遅着統計/reset、旧timer、

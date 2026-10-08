@@ -18,4 +18,6 @@ GPU・マイク・共有サービスへ接続せず、7種類の合成イベン�
 合成試験には`uv sync --frozen --extra livekit`を使用します。実接続・ブラウザACKの受入とは区別します。
 
 識別済みPCMを描画してACKする接続層は[ブラウザACK接続](docs/browser-playback-bridge.md)を参照してください。
-LiveKit RTPと元PCMの対応、およびネットワークRPC endpointは未実装です。
+LiveKit RTPと元PCMの対応は未実装です。既存認証のhost/RPCへ接続する
+[最小ブラウザデモ](docs/browser-demo.md)は日本語の操作画面・ローカル起動CLI・明示診断を提供します。
+実マイク・実会話・聴感の受入は自動検証と分けて行います。

@@ -17,6 +17,7 @@ dev = ["pytest==9.1.1", "pytest-asyncio==1.3.0", "ruff==0.14.0", "mypy==1.18.2",
 
 [project.scripts]
 voice-demo = "local_gpt_live.demo:main"
+browser-demo-host = "local_gpt_live.browser_demo:main"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

@@ -13,8 +13,7 @@ class ProviderError(RuntimeError):
     pass
 
 
-def client(url: str, *, transport: httpx.AsyncBaseTransport | None = None,
-           core: bool = False) -> httpx.AsyncClient:
+def validate_provider_url(url: str, *, core: bool = False) -> None:
     parsed = urlsplit(url)
     if (parsed.scheme not in {"http", "https"} or not parsed.hostname
             or parsed.username or parsed.password or parsed.query or parsed.fragment
@@ -22,6 +21,11 @@ def client(url: str, *, transport: httpx.AsyncBaseTransport | None = None,
         raise ValueError("invalid_provider_url")
     if core and parsed.hostname not in {"localhost", "127.0.0.1", "::1"}:
         raise ValueError("core_requires_loopback")
+
+
+def client(url: str, *, transport: httpx.AsyncBaseTransport | None = None,
+           core: bool = False) -> httpx.AsyncClient:
+    validate_provider_url(url, core=core)
     return httpx.AsyncClient(base_url=url.rstrip("/"), timeout=50, transport=transport,
                              trust_env=False, follow_redirects=False)
 

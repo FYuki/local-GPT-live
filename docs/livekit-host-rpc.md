@@ -43,7 +43,27 @@ hostは接続前に作り、`connect()`でRoom接続後にlocal participantへRP
 
 ブラウザは公式SDKの`localParticipant.performRpc`を使用する。
 認証済みアプリの接続設定からSession IDとconnection_idを取得し、通知購読をhost接続前に登録する。
-最初の`host_state`から初期binding/revisionを取得する。binding自体は認証資格情報ではない。
+最初の`host_state`または下記の専用状態取得RPCから初期binding/revisionを取得する。
+binding自体は認証資格情報ではない。SDKのDataReceivedがParticipantConnectedより先に届き、
+送信者participantを解決できない場合、その通知を採用しない。
+
+## 初期状態の取得
+
+`local-gpt-live.state.v1` はbindingをまだ持たない端末の初期同期専用RPC。
+payloadはexact field集合 `v:1, session_id, connection_id` の単一JSON object。
+制御と同じ8192 bytes上限・識別子制約・重複key/未知field拒否を適用する。
+hostはSDK caller identityと現在Roomの認可対象SIDを照合し、Session/connectionの一致後に
+`ok:true, v:1, type:"host_state"` と共通状態を返す。状態順序の採番以外にbinding、grant、
+入力revision、gate、Session応答を変更せず、制御RPCのbinding検証も保持する。
+未認証・不正schema・別Session/connectionには固定reasonの拒否だけを返し、状態を開示しない。
+
+端末は期待host identity/SIDをSDKのremoteParticipantsで確認してからこのRPCを呼び、
+応答後にも同じparticipant/SIDの存続を確認する。Session/connection/state_sequenceを検証してから
+制御を有効化する。participantが後着する場合はParticipantConnectedで取得へ進む。
+初期通知が欠落してもこの経路で同期できる。sender不明packetの採用、ダミーbindingを使った
+副作用RPCの拒否応答への依存、待ち時間だけのretryは行わない。
+
+## ブラウザからの制御例
 
 ```js
 const invoke = async (message, responseTimeout = 5000) => JSON.parse(

@@ -20,7 +20,7 @@ Coreへはaliasと確定textを送る。人格prompt、tool実行、長期記憶
 | remote_whisper_client.py | providers.Whisper | 同じraw PCM endpoint、async HTTP adapter |
 | voicevox_client.py | providers.Voicevox | 同じquery/synthesis endpoint、Session期限とasync取消へ接続 |
 | conversation_coreの人格/永続化/LLM経路 | providers.CoreChat | コピーせずCore Chat Completions API |
-| LiveKit RTC・FE再生観測 | RTC adapter・認証済みhost/RPC・FE未統合 | [host契約](livekit-host-rpc.md)で制御と既存ACK入口を接続。実ブラウザ会話受入は後続 |
+| LiveKit RTC・FE再生観測 | RTC adapter・認証済みhost/RPC・最小ブラウザデモ | [host契約](livekit-host-rpc.md)と[デモ入口](browser-demo.md)を接続。実ブラウザ会話受入は後続 |
 | Irodori HTTP/固定voice設定 | irodori.Irodori | 既存APIで登録済みvoiceを参照。声model/audioの同梱なし。engine自動fallbackなし |
 
 ## イベント・取消契約
@@ -54,7 +54,10 @@ Core取消はHTTP stream close。GPUジョブそのものの停止保証とは�
 最小RTC adapterはホストが指定したparticipant identity/SIDと新trackの照合、受信統計とPCM欠落の検査を持つ。
 [認証済みhost/RPC](livekit-host-rpc.md)はhost確認済み参加者・Sessionとの照合、5秒入力ACK、
 mute/focus/text/reconnectのdevice gate、宛先指定通知、既存実再生ACK受付をSDKへ接続する。
-ブラウザ側のマイク・echoCancellation/noiseSuppression・出力準備観測・実再生範囲対応は未統合。
+ブラウザ側のマイク・echoCancellation/noiseSuppression・出力準備観測は
+[最小デモ](browser-demo.md)から接続する。Backendがgrant/revision/応答/推定を所有し、
+端末が現在の接続照合、マイク、単一RTP出力接続を所有する。
+実再生範囲対応は未統合であり、この経路は実再生ACKを生成しない。
 `BackendVoiceInput.open`だけをネットワーク公開してはならない。
 残る境界を接続して実接続受入するまで、ブラウザ会話の完成版とはしない。
 300ms静音時のSTT準備先行、実再生prefixと履歴保存の連携、キャラクター固有の読み辞書も未統合。
