@@ -13,7 +13,7 @@ from local_gpt_live import livekit_input
 from local_gpt_live.playback import AudioPacket
 from local_gpt_live.session import Event
 
-from test_livekit_input import Stream, Track, statistics
+from test_livekit_input import Stream, Track, readiness_pending, statistics
 from test_livekit_transport import FakeParticipant, Rig, eventually
 
 
@@ -851,7 +851,7 @@ async def test_rpc_sender_room_sid_and_session_must_all_match(h, identity, sid, 
     {"expected_revision": True}, {"expected_revision": 0.0},
     {"expected_revision": None}, {"expected_revision": 999},
     {"expected_revision": float("nan")}, {"track_sid": []},
-    {"track_sid": "unknown"}, {"v": True}, {"unexpected": 1},
+    {"v": True}, {"unexpected": 1},
 ])
 async def test_invalid_control_fields_cannot_change_backend_generation(h, changes):
     await h.start()
@@ -1379,3 +1379,175 @@ async def test_malformed_input_ack_revokes_current_partial_grant(h, malformed):
     assert h.rig.audio.backend.grant is None
     assert Stream.instances == []
     assert h.rig.pipeline.received == []
+
+
+async def test_rpc_delayed_subscription_reuses_pending_request_and_ack_budget(h):
+    await h.start()
+    publication = h.remote.track_publications[h.track.sid]
+    publication.subscribed = False
+    baseline = {event: tuple(handlers) for event, handlers in h.rig.room.listeners.items()}
+    message = h.message("open_input", track_sid=h.track.sid, expected_revision=0)
+    opening = asyncio.create_task(h.invoke(json.dumps(message)))
+    retry = None
+    try:
+        await readiness_pending(h.rig.room, opening)
+        assert h.rig.audio.backend.grant is None
+        assert Stream.instances == []
+        h.rig.now_ns += 3_000_000_000
+        retry = asyncio.create_task(h.invoke(json.dumps(message)))
+        h.add_track("unrelated")
+        conflict = await h.invoke(json.dumps({**message, "track_sid": "unrelated"}))
+        assert not conflict["ok"]
+        publication.subscribed = True
+
+        async def statistics_after_subscription():
+            h.rig.now_ns += 1_500_000_000
+            return statistics()
+
+        h.track.get_stats = statistics_after_subscription
+        h.rig.room.emit("track_subscribed", h.track, publication, h.remote)
+        result, duplicate = await asyncio.gather(opening, retry)
+        assert result["ok"] and duplicate["ok"]
+        assert result["grant"] == duplicate["grant"]
+        assert 0 < result["remaining_ms"] <= 500
+        assert Stream.instances == []
+        assert h.rig.pipeline.received == []
+        assert {e: tuple(v) for e, v in h.rig.room.listeners.items() if v} == {
+            e: v for e, v in baseline.items() if v}
+        h.rig.now_ns += 500_000_001
+        assert not (await h.input_ack(result))["ok"]
+        assert h.rig.audio.backend.grant is None
+        assert Stream.instances == []
+    finally:
+        opening.cancel()
+        if retry is not None:
+            retry.cancel()
+        await asyncio.gather(opening, *([] if retry is None else [retry]), return_exceptions=True)
+
+
+@pytest.mark.parametrize("ready", [False, True])
+async def test_rpc_short_budget_expires_during_subscription_or_statistics(h, ready):
+    await h.start()
+    publication = h.remote.track_publications[h.track.sid]
+    publication.subscribed = False
+    message = h.message("open_input", track_sid=h.track.sid, expected_revision=0)
+    opening = asyncio.create_task(h.invoke(json.dumps(message), timeout=0.08))
+    gate = h.rig.gate(suppress_cancel=True)
+
+    async def delayed_stats():
+        await gate.wait()
+        return statistics()
+
+    h.track.get_stats = delayed_stats
+    try:
+        await readiness_pending(h.rig.room, opening)
+        if ready:
+            publication.subscribed = True
+            h.rig.room.emit("track_subscribed", h.track, publication, h.remote)
+            await asyncio.wait_for(gate.entered.wait(), 1)
+        result = await asyncio.wait_for(opening, 1)
+        assert not result["ok"]
+        gate.release.set()
+        publication.subscribed = True
+        h.rig.room.emit("track_subscribed", h.track, publication, h.remote)
+        await h.rig.transport.input.wait_for_cleanup()
+        assert h.rig.audio.backend.grant is None
+        assert h.rig.pipeline.received == []
+        assert Stream.instances == []
+    finally:
+        gate.release.set()
+        opening.cancel()
+        await asyncio.gather(opening, return_exceptions=True)
+
+
+async def test_rpc_cleanup_wait_consumes_original_preparation_deadline(h):
+    await h.start()
+    old_gate = h.rig.gate(suppress_cancel=True)
+
+    async def old_stats():
+        await old_gate.wait()
+        return statistics()
+
+    h.track.get_stats = old_stats
+    old = asyncio.create_task(h.control("open_input", track_sid=h.track.sid,
+                                        expected_revision=0))
+    new = None
+    try:
+        await old_gate.entered.wait()
+        assert (await h.control("mute", enabled=True))["ok"]
+        assert not (await old)["ok"]
+        assert (await h.control("mute", enabled=False))["ok"]
+        replacement = h.add_track("replacement")
+        message = h.message("open_input", track_sid=replacement.sid,
+                            expected_revision=h.rig.audio.backend.revision)
+        new = asyncio.create_task(h.invoke(json.dumps(message), timeout=0.03))
+        # cleanupが帰還しない場合にも、新openの元予算で終了する。
+        result = await asyncio.wait_for(new, 1)
+        assert not result["ok"]
+        assert replacement.calls == 0
+        old_gate.release.set()
+        await h.rig.transport.input.wait_for_cleanup()
+        assert h.rig.audio.backend.grant is None
+        assert Stream.instances == []
+        assert h.rig.pipeline.received == []
+        prepared, _ = await h.prepare(track_sid=replacement.sid)
+        assert (await h.input_ack(prepared))["ok"]
+        for _ in range(10):
+            Stream.instances[-1].push()
+        await eventually(lambda: len(h.rig.pipeline.received) == 10)
+    finally:
+        old_gate.release.set()
+        old.cancel()
+        if new is not None:
+            new.cancel()
+        await asyncio.gather(old, *([] if new is None else [new]), return_exceptions=True)
+
+
+@pytest.mark.parametrize("operation", ["mute", "focus", "text", "cancel", "reconnect", "close",
+                                      "disconnected", "reconnecting", "participant_disconnected"])
+async def test_rpc_stop_while_subscription_pending_blocks_late_track(h, operation):
+    await h.start()
+    response_id = None
+    if operation == "cancel":
+        response_id, _ = await h.response()
+    publication = h.remote.track_publications[h.track.sid]
+    publication.subscribed = False
+    baseline = {e: tuple(v) for e, v in h.rig.room.listeners.items() if v}
+    opening = asyncio.create_task(h.control("open_input", track_sid=h.track.sid,
+                                             expected_revision=h.rig.audio.backend.revision))
+    try:
+        await readiness_pending(h.rig.room, opening)
+        if operation in {"disconnected", "reconnecting"}:
+            h.rig.room.emit(operation)
+        elif operation == "participant_disconnected":
+            h.rig.room.remote_participants.clear()
+            h.rig.room.emit(operation, h.remote)
+        else:
+            fields = {"enabled": True} if operation in {"mute", "focus"} else {}
+            if operation == "text":
+                fields["text"] = "合成入力"
+            if operation == "cancel":
+                fields["response_id"] = response_id
+            assert (await h.control(operation, **fields))["ok"]
+        result = await asyncio.wait_for(opening, 1)
+        assert not result["ok"]
+        publication.subscribed = True
+        h.rig.room.emit("track_subscribed", h.track, publication, h.remote)
+        assert h.rig.audio.backend.grant is None
+        assert Stream.instances == []
+        assert h.rig.pipeline.received == []
+        if operation in {"mute", "focus", "text", "cancel", "reconnect"}:
+            assert {e: tuple(v) for e, v in h.rig.room.listeners.items() if v} == baseline
+            if operation in {"mute", "focus"}:
+                assert (await h.control(operation, enabled=False))["ok"]
+            h.add_track("replacement")
+            new, _ = await h.prepare(track_sid="replacement")
+            h.rig.room.emit("track_subscribed", h.track, publication, h.remote)
+            assert (await h.input_ack(new))["ok"]
+            for _ in range(10):
+                Stream.instances[-1].push()
+            await eventually(lambda: len(h.rig.pipeline.received) == 10)
+            assert h.rig.audio.backend.grant.track_sid == "replacement"
+    finally:
+        opening.cancel()
+        await asyncio.gather(opening, return_exceptions=True)

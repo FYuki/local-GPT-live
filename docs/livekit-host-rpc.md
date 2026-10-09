@@ -143,7 +143,10 @@ Roomの送信者identityとSID、host所有Session、bindingを副作用前に�
 ## 期限、拒否、再送、失効
 
 入力は最初のopen受付からACKまで5秒、SDK callerのresponse budgetが短ければその時間まで。
-統計待機・終了streamの回収待機・Backend reset・ACK待機が同一期限を消費する。
+publication到着・購読完了・RemoteTrack取得、統計待機・終了streamの回収待機・Backend reset・
+ACK待機が同一期限を消費する。cleanup後や各準備段階で期限を作り直さない。
+指定マイクが未準備ならSDK通知を待ち、通知の先着・遅着にかかわらず現在Roomの認可を再検証する。
+購読完了だけではreaderを作らず、BackendのgrantとそのACK後だけ正式PCM処理を開始する。
 再送は同じopen内容だけを同じgrant・残期限で返す。異なる内容は`input_conflict`で拒否。
 ACK欠落時はtimerから失効し、期限後のACKもtimer実行前に直接拒否する。
 期限内の同じACKはactive grantに限り冪等。現行grantへの不正ACKや開始失敗は部分認可を失効する。

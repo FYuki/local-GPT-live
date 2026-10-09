@@ -980,6 +980,39 @@ async def test_formal_utterance_started_after_estimated_deadline_has_no_old_over
     assert sum(event.kind == "output_estimated_completed" for event in rig.events) == 1
 
 
+async def test_direct_transport_input_waits_for_remote_subscription_without_host_ack(rig, monkeypatch):
+    from local_gpt_live import livekit_input
+    from test_livekit_input import Stream, Track, readiness_pending
+
+    Stream.instances = []
+    monkeypatch.setattr(livekit_input.rtc, "AudioStream", Stream)
+    track = Track()
+    publication = SimpleNamespace(sid=track.sid, track=None, subscribed=False, muted=False,
+                                  kind=livekit_transport.rtc.TrackKind.KIND_AUDIO,
+                                  source=livekit_transport.rtc.TrackSource.SOURCE_MICROPHONE)
+    participant = SimpleNamespace(identity="fixture-user", sid="PA-fixture",
+                                  track_publications={track.sid: publication})
+    rig.room.remote_participants[participant.identity] = participant
+    await rig.transport.connect()
+    opening = asyncio.create_task(rig.transport.open_input(track_sid=track.sid,
+                                                           request_id="direct", revision=1))
+    try:
+        await readiness_pending(rig.room, opening)
+        assert rig.audio.backend.grant is None
+        assert Stream.instances == []
+        publication.subscribed, publication.track = True, track
+        rig.room.emit("track_subscribed", track, publication, participant)
+        grant = await asyncio.wait_for(opening, 1)
+        assert rig.audio.backend.grant == grant
+        assert len(Stream.instances) == 1
+        for _ in range(10):
+            Stream.instances[-1].push()
+        await eventually(lambda: len(rig.pipeline.received) == 10)
+    finally:
+        opening.cancel()
+        await asyncio.gather(opening, return_exceptions=True)
+
+
 @pytest.mark.parametrize("text,new_response", [("うん", False), ("別の質問です", True)])
 async def test_formal_utterance_keeps_start_overlap_when_estimate_ends_during_speech(
     rig, text, new_response,

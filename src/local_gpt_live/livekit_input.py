@@ -9,6 +9,7 @@ from dataclasses import dataclass
 from livekit import rtc
 from livekit.rtc._proto.stats_pb2 import RtcStats
 from livekit.rtc.frame_processor import FrameProcessor
+from livekit.rtc.room import EventTypes
 
 from .input import AudioInput
 from .session import Event
@@ -95,12 +96,15 @@ def _counters(stats: Sequence[RtcStats]) -> _Counters:
 
 async def _observe(track: rtc.RemoteTrack,
                    remember: Callable[[asyncio.Task[list[RtcStats]]], None],
-                   previous: _Counters | None = None) -> _Counters:
+                   previous: _Counters | None = None, *,
+                   ready_deadline: float | None = None) -> _Counters:
     deadline = asyncio.get_running_loop().time() + (
         READY_SECONDS if previous is None else VERIFY_SECONDS
     )
+    if previous is None and ready_deadline is not None:
+        deadline = min(deadline, ready_deadline)
     try:
-        async with asyncio.timeout(READY_SECONDS if previous is None else VERIFY_SECONDS):
+        async with asyncio.timeout_at(deadline):
             while True:
                 operation = asyncio.create_task(track.get_stats())
                 remember(operation)
@@ -138,6 +142,11 @@ async def _observe(track: rtc.RemoteTrack,
                 await asyncio.sleep(0.05)
     except TimeoutError:
         raise AudioInputFault("audio_integrity_unavailable") from None
+    except asyncio.CancelledError:
+        # 共通期限の取消でも、統計待機の既存失敗分類を保つ。
+        if asyncio.get_running_loop().time() >= deadline:
+            raise AudioInputFault("audio_integrity_unavailable") from None
+        raise
 
 
 class LiveKitInput:
@@ -155,20 +164,99 @@ class LiveKitInput:
         self._closed = False
         self._prepared: tuple[InputGrant, rtc.RemoteTrack, _Counters] | None = None
 
-    def _track(self, track_sid: str) -> rtc.RemoteTrack:
+    def _ready_track(self, track_sid: str) -> rtc.RemoteTrack | None:
         participant = self.room.remote_participants.get(self.identity)
         if (participant is None or participant.identity != self.identity
                 or participant.sid != self.participant_sid):
             raise AudioInputFault("microphone_participant_unavailable")
         publication = participant.track_publications.get(track_sid)
-        if (publication is None or publication.sid != track_sid
+        if publication is None:
+            return None
+        if (publication.sid != track_sid
                 or publication.source != rtc.TrackSource.SOURCE_MICROPHONE
                 or publication.kind != rtc.TrackKind.KIND_AUDIO
-                or publication.muted or not publication.subscribed
-                or publication.track is None or publication.track.sid != track_sid
-                or publication.track.kind != rtc.TrackKind.KIND_AUDIO or publication.track.muted):
+                or publication.muted):
             raise AudioInputFault("microphone_track_unavailable")
-        return publication.track
+        track = publication.track
+        if track is not None and (track.sid != track_sid
+                                 or track.kind != rtc.TrackKind.KIND_AUDIO or track.muted):
+            raise AudioInputFault("microphone_track_unavailable")
+        return track if publication.subscribed else None
+
+    def _track(self, track_sid: str) -> rtc.RemoteTrack:
+        track = self._ready_track(track_sid)
+        if track is None:
+            raise AudioInputFault("microphone_track_unavailable")
+        return track
+
+    def _watch_preparation(self, track_sid: str, epoch: int,
+                           changed: asyncio.Event) -> list[tuple[EventTypes, Callable[..., None]]]:
+        handlers: list[tuple[EventTypes, Callable[..., None]]] = []
+
+        def invalidate(*_: object) -> None:
+            if handlers and epoch == self._epoch:
+                self.stop(reason="microphone_track_unavailable")
+
+        def target(participant: rtc.Participant, sid: str) -> bool:
+            return (participant.identity == self.identity
+                    and participant.sid == self.participant_sid and sid == track_sid)
+
+        def published(publication: rtc.RemoteTrackPublication,
+                      participant: rtc.RemoteParticipant) -> None:
+            if handlers and epoch == self._epoch and target(participant, publication.sid):
+                # 通知は再検証の契機に限り、認可は現在のRoom状態から行う。
+                try:
+                    self._ready_track(track_sid)
+                except AudioInputFault:
+                    invalidate()
+                changed.set()
+
+        def subscribed(_track: rtc.RemoteTrack, publication: rtc.RemoteTrackPublication,
+                       participant: rtc.RemoteParticipant) -> None:
+            published(publication, participant)
+
+        def unpublished(publication: rtc.RemoteTrackPublication,
+                        participant: rtc.RemoteParticipant) -> None:
+            if target(participant, publication.sid):
+                invalidate()
+
+        def unsubscribed(_track: rtc.RemoteTrack | None, publication: rtc.RemoteTrackPublication,
+                         participant: rtc.RemoteParticipant) -> None:
+            unpublished(publication, participant)
+
+        def muted(participant: rtc.Participant, publication: rtc.TrackPublication) -> None:
+            if target(participant, publication.sid):
+                invalidate()
+
+        def failed(participant: rtc.RemoteParticipant, sid: str, _error: str) -> None:
+            if target(participant, sid):
+                invalidate()
+
+        def left(participant: rtc.RemoteParticipant) -> None:
+            if participant.identity == self.identity and participant.sid == self.participant_sid:
+                invalidate()
+
+        def joined(participant: rtc.RemoteParticipant) -> None:
+            if participant.identity == self.identity and participant.sid != self.participant_sid:
+                invalidate()
+
+        registrations: list[tuple[EventTypes, Callable[..., None]]] = [
+            ("track_published", published), ("track_subscribed", subscribed),
+            ("track_unpublished", unpublished), ("track_unsubscribed", unsubscribed),
+            ("track_muted", muted), ("track_subscription_failed", failed),
+            ("participant_disconnected", left), ("participant_connected", joined),
+            ("disconnected", invalidate), ("reconnecting", invalidate),
+        ]
+        try:
+            for event, handler in registrations:
+                self.room.on(event, handler)
+                handlers.append((event, handler))
+        except BaseException:
+            for event, handler in handlers:
+                self.room.off(event, handler)
+            handlers.clear()
+            raise
+        return handlers
 
     def _remember(self, task: asyncio.Task[None]) -> None:
         self._tasks.add(task)
@@ -196,12 +284,19 @@ class LiveKitInput:
             raise AudioInputFault("microphone_stream_unavailable")
         return grant
 
-    async def prepare(self, *, track_sid: str, request_id: str, revision: int) -> InputGrant:
+    async def prepare(self, *, track_sid: str, request_id: str, revision: int,
+                      deadline: float | None = None) -> InputGrant:
+        if deadline is None:
+            deadline = asyncio.get_running_loop().time() + READY_SECONDS
         task = asyncio.current_task()
         assert task is not None
         self._opens.add(task)
         try:
-            return await self._prepare(track_sid=track_sid, request_id=request_id, revision=revision)
+            async with asyncio.timeout_at(deadline):
+                return await self._prepare(track_sid=track_sid, request_id=request_id,
+                                           revision=revision, deadline=deadline)
+        except TimeoutError:
+            raise AudioInputFault("microphone_track_unavailable") from None
         finally:
             self._opens.discard(task)
 
@@ -224,7 +319,8 @@ class LiveKitInput:
                 # 終了readerのretire callbackが新たなrelease taskを所有する。
                 await asyncio.sleep(0)
 
-    async def _prepare(self, *, track_sid: str, request_id: str, revision: int) -> InputGrant:
+    async def _prepare(self, *, track_sid: str, request_id: str, revision: int,
+                       deadline: float) -> InputGrant:
         async with self._opening:
             if self._closed:
                 raise AudioInputFault("audio_input_closed")
@@ -232,35 +328,51 @@ class LiveKitInput:
                     or not isinstance(request_id, str) or not request_id
                     or type(revision) is not int or revision <= 0):
                 raise AudioInputFault("invalid_input_request")
-            track = self._track(track_sid)
+            self._ready_track(track_sid)
             old = self.audio.backend.grant
             if (old is not None
                     and (self._prepared is not None
                          or self._reader is not None and not self._reader.done())
                     and (track_sid, request_id, revision)
                     == (old.track_sid, old.request_id, old.input_revision)):
+                self._track(track_sid)
                 return old
             if revision <= self.audio.backend.revision:
                 raise AudioInputFault("stale_input_request")
             if self._cleanup_pending():
                 raise AudioInputFault("microphone_cleanup_pending")
             epoch = self._epoch
-            counters = await _observe(track, self._observe_task)
-            if self._closed or epoch != self._epoch or self._track(track_sid) is not track:
-                raise AudioInputFault("stale_input_request")
-            if self._cleanup_pending():
-                raise AudioInputFault("microphone_cleanup_pending")
-            grant = await self.audio.open(track_sid=track_sid, request_id=request_id,
-                                          revision=revision)
+            changed = asyncio.Event()
+            handlers = self._watch_preparation(track_sid, epoch, changed)
             try:
+                while True:
+                    changed.clear()
+                    track = self._ready_track(track_sid)
+                    if track is not None:
+                        break
+                    await changed.wait()
+                counters = await _observe(track, self._observe_task, ready_deadline=deadline)
                 if self._closed or epoch != self._epoch or self._track(track_sid) is not track:
                     raise AudioInputFault("stale_input_request")
-            except Exception:
-                if self.audio.backend.grant is grant:
-                    self.stop(reason="input_open_failed")
-                raise
-            self._prepared = (grant, track, counters)
-            return grant
+                if self._cleanup_pending():
+                    raise AudioInputFault("microphone_cleanup_pending")
+                grant = await self.audio.open(track_sid=track_sid, request_id=request_id,
+                                              revision=revision)
+                try:
+                    if (self._closed or epoch != self._epoch
+                            or asyncio.get_running_loop().time() >= deadline
+                            or self._track(track_sid) is not track):
+                        raise AudioInputFault("stale_input_request")
+                except Exception:
+                    if self.audio.backend.grant is grant:
+                        self.stop(reason="input_open_failed")
+                    raise
+                self._prepared = (grant, track, counters)
+                return grant
+            finally:
+                for event, handler in handlers:
+                    self.room.off(event, handler)
+                handlers.clear()
 
     def start(self, grant: InputGrant) -> bool:
         if self._closed or self.audio.backend.grant is not grant:

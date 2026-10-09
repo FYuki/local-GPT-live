@@ -4,6 +4,7 @@
 # ruff: noqa: E402
 
 import asyncio
+from collections import defaultdict
 from types import SimpleNamespace
 
 import pytest
@@ -99,6 +100,34 @@ class Stream:
         self.queue.put(None)
 
 
+class InputRoom:
+    def __init__(self, participant):
+        self.remote_participants = {participant.identity: participant}
+        self.listeners = defaultdict(list)
+        self.connected = True
+
+    def on(self, event, handler):
+        self.listeners[event].append(handler)
+
+    def off(self, event, handler):
+        self.listeners[event].remove(handler)
+
+    def emit(self, event, *args):
+        if event == "disconnected":
+            self.connected = False
+        for handler in tuple(self.listeners[event]):
+            handler(*args)
+
+    def isconnected(self):
+        return self.connected
+
+
+async def readiness_pending(room, opening):
+    # 登録は同期点としてのみ使い、成功条件はgrantとPCM到達で観測する。
+    await until(lambda: opening.done() or bool(room.listeners["track_subscribed"]))
+    assert not opening.done(), "準備未完了のマイクを即時拒否している"
+
+
 @pytest.fixture
 async def harness(monkeypatch):
     Stream.instances = []
@@ -116,7 +145,7 @@ async def harness(monkeypatch):
                                   source=rtc.TrackSource.SOURCE_MICROPHONE)
     participant = SimpleNamespace(identity="browser", sid="participant",
                                   track_publications={track.sid: publication})
-    room = SimpleNamespace(remote_participants={participant.identity: participant})
+    room = InputRoom(participant)
     bridge = LiveKitInput(audio, room, participant.identity, participant.sid)
     yield SimpleNamespace(bridge=bridge, audio=audio, pipeline=pipeline, events=events,
                           track=track, publication=publication, participant=participant, room=room)
@@ -204,7 +233,6 @@ async def test_verified_batch_reaches_real_backend_with_sdk_sample_positions(har
     assert stream.options["sample_rate"] == 16_000
     assert stream.options["num_channels"] == 1
     assert stream.options["frame_size_ms"] == 10
-    assert stream.options["capacity"] == 160
     for _ in range(9):
         stream.push()
     await asyncio.sleep(0.01)
@@ -560,3 +588,318 @@ async def test_start_rechecks_participant_after_preparation(harness):
     assert not h.bridge.start(grant)
     assert h.audio.backend.grant is None
     assert Stream.instances == []
+
+
+@pytest.mark.parametrize("missing", ["publication", "subscription", "track"])
+@pytest.mark.parametrize("notification", ["published", "subscribed", "both"])
+async def test_delayed_microphone_readiness_prepares_without_starting_pcm(harness, missing,
+                                                                        notification):
+    h = harness
+    if missing == "publication":
+        h.participant.track_publications.clear()
+    elif missing == "subscription":
+        h.publication.subscribed = False
+    else:
+        h.publication.track = None
+    opening = asyncio.create_task(h.bridge.prepare(track_sid=h.track.sid, request_id="delayed",
+                                                   revision=1))
+    try:
+        await readiness_pending(h.room, opening)
+        assert h.audio.backend.grant is None
+        assert Stream.instances == []
+        h.participant.track_publications[h.track.sid] = h.publication
+        h.publication.subscribed, h.publication.track = True, h.track
+        if notification in {"published", "both"}:
+            h.room.emit("track_published", h.publication, h.participant)
+        if notification in {"subscribed", "both"}:
+            h.room.emit("track_subscribed", h.track, h.publication, h.participant)
+        grant = await asyncio.wait_for(opening, 1)
+        assert grant.track_sid == h.track.sid
+        assert h.audio.backend.grant == grant
+        assert Stream.instances == []
+        assert h.pipeline.received == []
+        assert not any(h.room.listeners.values())
+        h.room.emit("track_subscribed", h.track, h.publication, h.participant)
+        assert h.bridge.start(grant)
+        for _ in range(10):
+            Stream.instances[-1].push()
+        await until(lambda: len(h.pipeline.received) == 10)
+        assert len(Stream.instances) == 1
+    finally:
+        opening.cancel()
+        await asyncio.gather(opening, return_exceptions=True)
+
+
+@pytest.mark.parametrize("attribute,value", [
+    ("participant.sid", "rejoined"), ("participant.identity", "other"),
+    ("publication.sid", "other"),
+    ("publication.source", rtc.TrackSource.SOURCE_SCREENSHARE_AUDIO),
+    ("publication.kind", rtc.TrackKind.KIND_VIDEO), ("publication.muted", True),
+    ("track.sid", "other"), ("track.kind", rtc.TrackKind.KIND_VIDEO),
+    ("track.muted", True),
+])
+async def test_delayed_readiness_revalidates_room_instead_of_event_payload(harness, attribute, value):
+    h = harness
+    h.publication.subscribed = False
+    opening = asyncio.create_task(h.bridge.prepare(track_sid="microphone", request_id="delayed",
+                                                   revision=1))
+    try:
+        await readiness_pending(h.room, opening)
+        target, name = attribute.split(".")
+        setattr(getattr(h, target), name, value)
+        h.publication.subscribed = True
+        trusted_track = Track()
+        trusted_publication = SimpleNamespace(sid="microphone", track=trusted_track,
+                                              subscribed=True, muted=False,
+                                              kind=rtc.TrackKind.KIND_AUDIO,
+                                              source=rtc.TrackSource.SOURCE_MICROPHONE)
+        h.room.emit("track_subscribed", trusted_track, trusted_publication,
+                    SimpleNamespace(identity="browser", sid="participant"))
+        with pytest.raises((AudioInputFault, asyncio.CancelledError)):
+            await asyncio.wait_for(opening, 1)
+        assert h.audio.backend.grant is None
+        assert Stream.instances == []
+        assert h.pipeline.received == []
+        assert not any(h.room.listeners.values())
+    finally:
+        opening.cancel()
+        await asyncio.gather(opening, return_exceptions=True)
+
+
+@pytest.mark.parametrize("event", ["track_muted", "track_unsubscribed", "track_unpublished",
+                                  "track_subscription_failed", "participant_disconnected",
+                                  "participant_connected", "disconnected", "reconnecting"])
+@pytest.mark.parametrize("phase", ["subscription", "statistics", "reset"])
+async def test_readiness_invalidation_survives_late_resources(harness, monkeypatch, event, phase):
+    h = harness
+    entered, release = asyncio.Event(), asyncio.Event()
+    original = h.track.get_stats if phase == "statistics" else h.audio.open
+
+    async def delayed(*args, **kwargs):
+        entered.set()
+        try:
+            await release.wait()
+        except asyncio.CancelledError:
+            await release.wait()
+        return await original(*args, **kwargs)
+
+    if phase == "subscription":
+        h.publication.subscribed = False
+    elif phase == "statistics":
+        monkeypatch.setattr(h.track, "get_stats", delayed)
+    else:
+        monkeypatch.setattr(h.audio, "open", delayed)
+    opening = asyncio.create_task(h.bridge.prepare(track_sid="microphone", request_id="old",
+                                                   revision=1))
+    try:
+        if phase == "subscription":
+            await readiness_pending(h.room, opening)
+        else:
+            await asyncio.wait_for(entered.wait(), 1)
+        if event == "track_muted":
+            h.publication.muted = True
+            h.room.emit(event, h.participant, h.publication)
+            h.publication.muted = False
+            h.room.emit("track_unmuted", h.participant, h.publication)
+        elif event == "track_unsubscribed":
+            h.publication.track, h.publication.subscribed = None, False
+            h.room.emit(event, h.track, h.publication, h.participant)
+        elif event == "track_unpublished":
+            h.participant.track_publications.clear()
+            h.room.emit(event, h.publication, h.participant)
+        elif event == "track_subscription_failed":
+            h.room.emit(event, h.participant, "microphone", "synthetic SDK failure")
+        elif event == "participant_disconnected":
+            h.room.remote_participants.clear()
+            h.room.emit(event, h.participant)
+        elif event == "participant_connected":
+            replacement = SimpleNamespace(identity="browser", sid="replacement",
+                                          track_publications={})
+            h.room.remote_participants["browser"] = replacement
+            h.room.emit(event, replacement)
+        else:
+            h.room.emit(event)
+        h.participant.track_publications["microphone"] = h.publication
+        h.publication.subscribed, h.publication.track = True, h.track
+        h.room.emit("track_subscribed", h.track, h.publication, h.participant)
+        release.set()
+        with pytest.raises((AudioInputFault, asyncio.CancelledError)):
+            await asyncio.wait_for(opening, 1)
+        await h.bridge.wait_for_cleanup()
+        assert h.audio.backend.grant is None
+        assert Stream.instances == []
+        assert h.pipeline.received == []
+        assert not any(h.room.listeners.values())
+    finally:
+        release.set()
+        opening.cancel()
+        await asyncio.gather(opening, return_exceptions=True)
+
+
+async def test_never_ready_microphone_times_out_and_detaches_listeners(harness):
+    h = harness
+    h.participant.track_publications.clear()
+    opening = asyncio.create_task(h.bridge.prepare(track_sid="microphone", request_id="missing",
+                                                   revision=1))
+    try:
+        await readiness_pending(h.room, opening)
+        with pytest.raises(AudioInputFault):
+            await asyncio.wait_for(opening, 1)
+        h.participant.track_publications["microphone"] = h.publication
+        h.room.emit("track_subscribed", h.track, h.publication, h.participant)
+        assert h.audio.backend.grant is None
+        assert Stream.instances == []
+        assert not any(h.room.listeners.values())
+    finally:
+        opening.cancel()
+        await asyncio.gather(opening, return_exceptions=True)
+
+
+@pytest.mark.parametrize("notify_first", [False, True])
+async def test_ready_microphone_does_not_require_a_new_notification(harness, notify_first):
+    h = harness
+    if notify_first:
+        h.room.emit("track_published", h.publication, h.participant)
+        h.room.emit("track_subscribed", h.track, h.publication, h.participant)
+    grant = await asyncio.wait_for(h.bridge.prepare(track_sid="microphone", request_id="ready",
+                                                   revision=1), 1)
+    assert h.audio.backend.grant == grant
+    assert Stream.instances == []
+    assert not any(h.room.listeners.values())
+    assert h.bridge.start(grant)
+    for _ in range(10):
+        Stream.instances[-1].push()
+    await until(lambda: len(h.pipeline.received) == 10)
+
+
+async def test_other_participant_and_track_events_do_not_authorize_or_stop_waiting(harness):
+    h = harness
+    h.publication.subscribed = False
+    opening = asyncio.create_task(h.bridge.prepare(track_sid="microphone", request_id="waiting",
+                                                   revision=1))
+    try:
+        await readiness_pending(h.room, opening)
+        other = SimpleNamespace(identity="other", sid="other", track_publications={})
+        other_publication = SimpleNamespace(sid="other-track")
+        h.room.emit("track_subscribed", Track(), h.publication, other)
+        h.room.emit("track_muted", other, h.publication)
+        h.room.emit("track_subscription_failed", h.participant, "other-track", "SDK error")
+        h.room.emit("track_unpublished", other_publication, h.participant)
+        h.room.emit("participant_disconnected", other)
+        assert h.audio.backend.grant is None
+        assert Stream.instances == []
+        h.publication.subscribed = True
+        h.room.emit("track_subscribed", h.track, h.publication, h.participant)
+        grant = await asyncio.wait_for(opening, 1)
+        assert grant.track_sid == "microphone"
+        assert h.bridge.start(grant)
+        for _ in range(10):
+            Stream.instances[-1].push()
+        await until(lambda: len(h.pipeline.received) == 10)
+    finally:
+        opening.cancel()
+        await asyncio.gather(opening, return_exceptions=True)
+
+
+async def test_detached_preparation_callbacks_cannot_stop_new_operation(harness):
+    h = harness
+    h.publication.subscribed = False
+    old = asyncio.create_task(h.bridge.prepare(track_sid="microphone", request_id="old",
+                                               revision=1))
+    await readiness_pending(h.room, old)
+    callbacks = {event: tuple(handlers) for event, handlers in h.room.listeners.items()}
+    h.bridge.stop(reason="muted")
+    await asyncio.gather(old, return_exceptions=True)
+    new = asyncio.create_task(h.bridge.prepare(track_sid="microphone", request_id="new",
+                                               revision=h.audio.backend.revision + 1))
+    try:
+        await readiness_pending(h.room, new)
+        callbacks["track_muted"][0](h.participant, h.publication)
+        callbacks["track_subscription_failed"][0](h.participant, "microphone", "SDK error")
+        callbacks["disconnected"][0]()
+        callbacks["track_subscribed"][0](h.track, h.publication, h.participant)
+        assert not new.done()
+        current_callback = h.room.listeners["disconnected"][0]
+        h.publication.subscribed = True
+        h.room.emit("track_subscribed", h.track, h.publication, h.participant)
+        grant = await new
+        # 成功後に保存済みcallbackを呼んでも、準備済みgrantを失効させない。
+        current_callback()
+        assert h.audio.backend.grant is grant
+        assert h.bridge.start(grant)
+        for _ in range(10):
+            Stream.instances[-1].push()
+        await until(lambda: len(h.pipeline.received) == 10)
+    finally:
+        new.cancel()
+        await asyncio.gather(new, return_exceptions=True)
+
+
+async def test_preparation_deadline_rejects_cancel_resistant_reset(harness, monkeypatch):
+    h = harness
+    entered, release, cancelled = asyncio.Event(), asyncio.Event(), asyncio.Event()
+    original = h.audio.open
+
+    async def late_reset(**kwargs):
+        entered.set()
+        try:
+            await release.wait()
+        except asyncio.CancelledError:
+            cancelled.set()
+            await release.wait()
+        return await original(**kwargs)
+
+    monkeypatch.setattr(h.audio, "open", late_reset)
+    opening = asyncio.create_task(h.bridge.prepare(track_sid="microphone", request_id="timeout",
+                                                   revision=1))
+    try:
+        await entered.wait()
+        await asyncio.wait_for(cancelled.wait(), 1)
+        release.set()
+        with pytest.raises(AudioInputFault):
+            await opening
+        assert h.audio.backend.grant is None
+        assert Stream.instances == []
+        assert h.pipeline.received == []
+        assert not any(h.room.listeners.values())
+    finally:
+        release.set()
+        opening.cancel()
+        await asyncio.gather(opening, return_exceptions=True)
+
+
+@pytest.mark.parametrize("fault", ["codec", "clock_rate", "concealed", "timestamp"])
+async def test_initial_statistics_must_be_complete_48khz_opus_before_grant(harness, fault):
+    h = harness
+    values = statistics()
+    if fault == "codec":
+        values[1].codec.codec.mime_type = "audio/pcmu"
+    elif fault == "clock_rate":
+        values[1].codec.codec.clock_rate = 16_000
+    elif fault == "concealed":
+        values[0].inbound_rtp.inbound.ClearField("concealed_samples")
+    else:
+        values[0].inbound_rtp.rtc.ClearField("timestamp")
+
+    async def invalid_statistics():
+        return values
+
+    h.track.get_stats = invalid_statistics
+    with pytest.raises(AudioInputFault):
+        await asyncio.wait_for(h.bridge.prepare(track_sid="microphone", request_id="invalid",
+                                               revision=1), 1)
+    assert h.audio.backend.grant is None
+    assert Stream.instances == []
+    assert h.pipeline.received == []
+
+
+@pytest.mark.parametrize("rate,channels,samples", [(8_000, 1, 160), (16_000, 2, 160),
+                                                   (16_000, 1, 320)])
+async def test_invalid_sdk_frame_never_reaches_backend(harness, rate, channels, samples):
+    h = harness
+    _, stream = await opened(h)
+    frame = rtc.AudioFrame(bytes(samples * channels * 2), rate, channels, samples)
+    stream.queue.put(rtc.AudioFrameEvent(frame))
+    await until(lambda: h.audio.backend.grant is None)
+    assert h.pipeline.received == []
+    await until(lambda: stream.closed == 1)

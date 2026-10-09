@@ -90,12 +90,21 @@ ready期限はpublish後の同じ単調時計で保存し、timer実行前でも
 RPC入力は`prepare_input`で統計・grantを準備し、保存したgrantのACK後に`start_input`する。
 直接Python入口の`open_input`はこの二つを続けて実行する。
 SDK終了処理待機もRPC側の同じ入力期限を消費する。新trackの統計用配送はgrant前に開始する。
+publication未到着・未購読・RemoteTrack未取得は、SDKの公開・購読通知と現在のRoom状態で
+有限時間待機する。通知が先着済みなら現在状態だけから準備を進め、固定sleepや強制購読は行わない。
+identity・認可済みparticipant SID・指定track SID・microphone source・audio kind・非muteを
+共通の検査で照合し、取得済みRemoteTrackの不一致は待機で隠さず拒否する。
+準備監視は初回統計・Backend reset待機中も維持し、成功・失敗・取消で解除する。
+対象trackのmute・unsubscribe・unpublish・購読失敗、participant退室・SID交代、RTC切断で
+旧準備を失効させる。通知payloadから認可せず、遅着やgate解除だけで旧操作を復活させない。
 
 ## 音声形式と送信情報
 
 入力は SDK が 16 kHz mono PCM16 に変換した frame を受け取る。
 sample 位置は SDK queue に入る前に記録し、ローカル queue 欠落を後段の連続性検査へ伝える。
 開始前は有効な Opus 48 kHz 受信統計を最大 4 秒待つ。
+RPCでは購読準備と初回統計もopenからACKまでの共通期限を消費し、統計待機は最大4秒と
+残期限の短い方まで。直接Python入口では購読準備と初回統計で4秒の準備期限を共有する。
 開始後は 10 ms 以下の frame を 10 個ずつ保留し、前進した統計を最大 1 秒確認した後に後段へ渡す。
 通常の 10 ms frame では音声量で 100 ms 分を保留し、さらに統計確認を待つ。
 統計 ID の交代、counter の逆行、欠測、非無音 concealment 増分 80 ms 以上は入力を停止する。
