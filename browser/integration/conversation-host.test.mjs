@@ -58,7 +58,7 @@ async function pythonHost(t) {
   return { request };
 }
 
-async function fixture(t) {
+async function fixture(t, pendingSubscription = false) {
   const { createConversation } = await import('../conversation.mjs');
   const host = await pythonHost(t);
   const initial = await host.request('initial');
@@ -70,7 +70,7 @@ async function fixture(t) {
   const microphone = transport.microphone.bind(transport);
   transport.microphone = async () => {
     const track = await microphone();
-    await host.request('publish', { track_sid: track.trackSid });
+    await host.request('publish', { track_sid: track.trackSid, pending: pendingSubscription });
     return track;
   };
   const conversation = createConversation({ transport, connection: { ...connection,
@@ -135,4 +135,53 @@ test('実hostの出力metadataから制御bindingでreadyを送り推定終了�
   assert.equal(conversation.snapshot().outputActive, true);
   assert.equal(transport.calls.filter(call => ['playback_ack', 'playback_complete']
     .includes(call.message.type)).length, 0);
+});
+
+test('購読が遅れた実hostは準備を待ちブラウザのACK後だけPCMを受け取る', async t => {
+  const { host, transport, conversation } = await fixture(t, true);
+  const ack = deferred();
+  const rpc = transport.rpc;
+  let ackWaiting = false;
+  transport.rpc = async (message, timeoutMs) => {
+    if (message.type === 'input_ack') { ackWaiting = true; await ack.promise; }
+    return rpc(message, timeoutMs);
+  };
+  t.after(() => ack.resolve());
+  const opening = conversation.startMicrophone().then(() => true, () => false);
+  await until(() => transport.calls.some(call => call.message.type === 'open_input'));
+  assert.equal(await host.request('input_pending'), true);
+  assert.equal(conversation.snapshot().inputAuthorized, false);
+  assert.equal((await host.request('status')).readers, 0);
+  await host.request('subscribe', { track_sid: transport.microphones[0].trackSid });
+  await until(() => ackWaiting);
+  assert.equal((await host.request('status')).received, 0);
+  assert.equal((await host.request('status')).readers, 0);
+  ack.resolve();
+  assert.equal(await opening, true);
+  assert.equal(conversation.snapshot().inputAuthorized, true);
+  assert.equal(await host.request('push'), 10);
+});
+
+test('購読待機中のgateと遅着後も同じ会話で明示的な再開始を必要とする', async t => {
+  const { host, transport, conversation } = await fixture(t, true);
+  const opening = assert.rejects(conversation.startMicrophone());
+  await until(() => transport.calls.some(call => call.message.type === 'open_input'));
+  assert.equal(await host.request('input_pending'), true);
+  const oldSid = transport.microphones[0].trackSid;
+  await conversation.setGate('mute', true);
+  await opening;
+  await host.request('subscribe', { track_sid: oldSid });
+  await conversation.setGate('mute', false);
+  assert.equal(conversation.snapshot().inputAuthorized, false);
+  assert.equal(transport.microphones[0].closed, true);
+  assert.equal((await host.request('status')).readers, 0);
+  assert.equal((await host.request('status')).received, 0);
+  const replacement = conversation.startMicrophone().then(() => true, () => false);
+  await until(() => transport.microphones.length === 2 &&
+    transport.calls.filter(call => call.message.type === 'open_input').length === 2);
+  assert.equal(await host.request('input_pending'), true);
+  await host.request('subscribe', { track_sid: transport.microphones[1].trackSid });
+  assert.equal(await replacement, true);
+  assert.equal(conversation.snapshot().inputAuthorized, true);
+  assert.equal(await host.request('push'), 10);
 });

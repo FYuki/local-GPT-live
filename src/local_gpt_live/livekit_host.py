@@ -201,6 +201,7 @@ class LiveKitHost:
             task = asyncio.create_task(self.transport.prepare_input(
                 track_sid=command.track_sid, request_id=command.request_id,
                 revision=self.transport.audio.backend.revision + 1,
+                deadline=asyncio.get_running_loop().time() + duration,
             ))
             operation = _InputOperation(command, self._clock_ns() + round(duration * 1e9), task)
             self._input = operation

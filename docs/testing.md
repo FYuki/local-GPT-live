@@ -10,6 +10,7 @@ uv run --no-sync pytest -q
 uv run --no-sync ruff check .
 uv run --no-sync mypy
 uv run --no-sync python tools/check_docs.py
+uv run --no-sync python tools/check_repository.py
 uv build
 uv run --no-sync voice-demo
 ```
@@ -67,6 +68,13 @@ SID・binding変更後の未送信通知破棄を確認する。SDKはfake、pro
 通知/RPC応答だけを使う端末doubleで、STT起動のready/cancel、gate解除・論理再接続・
 stream終了・ACK期限切れ後の再認可、失敗通知、旧接続・順序逆転した状態の拒否も確認する。
 実LiveKit・ブラウザ・実マイクを通すSTや性能測定として扱わない。
+マイク準備競合は`tests/test_livekit_input.py`で公開未到着・未購読・track未取得からの成功、
+通知先着・現在状態の不一致、購読・統計・reset待機中の失効と遅着、listener回収を確認する。
+IT1では短いcaller予算、cleanup・購読・統計・再送・ACKの共通期限、停止後の明示再認可を観測する。
+`tests/test_livekit_transport.py`は直接Python入力がACKなしで購読準備後に開始することを確認する。
+`npm --prefix browser run test:integration`のconversation-host試験は同じcontrollerから実hostと
+Backendを通し、購読遅延後もACK前のPCM処理0件、ACK後の到達、gate後の遅着抑止を観測する。
+RTC配送・マイク・推論はdoubleと合成PCMであり、実RTC・実マイク・聴感は親の受入として残す。
 既存browser IT2は次のコマンドで回帰確認する。
 
 ```sh

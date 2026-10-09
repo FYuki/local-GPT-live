@@ -19,20 +19,44 @@ from test_livekit_transport import eventually  # noqa: E402
 async def main():
     patch = pytest.MonkeyPatch()
     fixture = HostRig(patch)
+    controls = set()
+
+    async def control(command):
+        result = await fixture.invoke(json.dumps(command["message"]))
+        print(json.dumps({"id": command["id"], "result": result}), flush=True)
+
     try:
         await fixture.start()
         await fixture.host._notifications.join()
         while raw := await asyncio.to_thread(sys.stdin.buffer.readline, 65537):
             command = json.loads(raw)
             name = command["command"]
+            if name == "control":
+                operation = asyncio.create_task(control(command))
+                controls.add(operation)
+                continue
             async with asyncio.timeout(5):
                 if name == "initial":
                     result = fixture.participant.notifications[0][0]
                 elif name == "publish":
-                    fixture.add_track(command["track_sid"])
+                    track = fixture.add_track(command["track_sid"])
+                    publication = fixture.remote.track_publications[track.sid]
+                    if command.get("pending", False):
+                        publication.subscribed, publication.track = False, None
+                    fixture.rig.room.emit("track_published", publication, fixture.remote)
                     result = True
-                elif name == "control":
-                    result = await fixture.invoke(json.dumps(command["message"]))
+                elif name == "input_pending":
+                    await eventually(lambda: bool(fixture.rig.room.listeners["track_subscribed"])
+                                     or all(task.done() for task in controls))
+                    result = any(not task.done() for task in controls)
+                elif name == "subscribe":
+                    from test_livekit_input import Track
+                    publication = fixture.remote.track_publications[command["track_sid"]]
+                    track = Track()
+                    track.sid = publication.sid
+                    publication.track, publication.subscribed = track, True
+                    fixture.rig.room.emit("track_subscribed", track, publication, fixture.remote)
+                    result = True
                 elif name == "state":
                     from local_gpt_live.livekit_host import STATE_METHOD
                     data = rtc.RpcInvocationData(request_id="state-request", caller_identity="fixture-user",
@@ -73,6 +97,9 @@ async def main():
             if name == "close":
                 break
     finally:
+        for operation in controls:
+            operation.cancel()
+        await asyncio.gather(*controls, return_exceptions=True)
         for gate in fixture.rig.gates:
             gate.release.set()
         if fixture.host is not None:

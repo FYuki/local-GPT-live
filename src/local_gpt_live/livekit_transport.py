@@ -289,13 +289,16 @@ class LiveKitTransport:
             raise RuntimeError("livekit_not_connected")
         return await self.input.open(track_sid=track_sid, request_id=request_id, revision=revision)
 
-    async def prepare_input(self, *, track_sid: str, request_id: str, revision: int) -> InputGrant:
+    async def prepare_input(self, *, track_sid: str, request_id: str, revision: int,
+                            deadline: float) -> InputGrant:
         if not self._connected or self._closed:
             raise RuntimeError("livekit_not_connected")
-        await self.input.wait_for_cleanup()
+        async with asyncio.timeout_at(deadline):
+            await self.input.wait_for_cleanup()
         if not self._connected or self._closed:
             raise RuntimeError("livekit_not_connected")
-        return await self.input.prepare(track_sid=track_sid, request_id=request_id, revision=revision)
+        return await self.input.prepare(track_sid=track_sid, request_id=request_id,
+                                        revision=revision, deadline=deadline)
 
     def start_input(self, grant: InputGrant) -> bool:
         return self._connected and not self._closed and self.input.start(grant)
